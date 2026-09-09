@@ -1,0 +1,8 @@
+{
+  "name": "context-service",
+  "version": "0.1.0",
+  "description": "为 Qoder 提供安全的上下文、知识、规则、长期记忆和会话能力。",
+  "commands": "./commands/",
+  "hooks": "./hooks/hooks.json",
+  "skills": "./skills"
+}

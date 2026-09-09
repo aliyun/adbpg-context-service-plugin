@@ -1,0 +1,29 @@
+{
+  "name": "@context-service/qoder-plugin",
+  "version": "0.1.0",
+  "private": true,
+  "description": "为 Qoder 提供 Context Service 上下文与记忆能力",
+  "type": "module",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    ".qoder-plugin/",
+    "bin/",
+    "commands/",
+    "hooks/",
+    "install.sh",
+    "skills/",
+    "src/",
+    "README.md",
+    "PRIVACY.md",
+    "SECURITY.md"
+  ],
+  "scripts": {
+    "check": "sh -n bin/context-service-qoder && node --check bin/context-service-qoder.mjs && node --check bin/context-service-mcp-bridge.mjs && node --check src/config.mjs && node --check src/context-client.mjs && node --check src/diagnostics.mjs && node --check src/hook-handler.mjs && node --check src/lifecycle.mjs && node --check src/mcp-bridge.mjs && node --check src/transcript.mjs && node --check src/turn-id.mjs && node --check src/version.mjs && node --check scripts/build-release.mjs",
+    "build:release": "node scripts/build-release.mjs",
+    "test": "node --test",
+    "verify": "npm run check && npm test"
+  }
+}
