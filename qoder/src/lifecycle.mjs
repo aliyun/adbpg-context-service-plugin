@@ -224,15 +224,30 @@ async function prepareInstallConfig(options, paths) {
   }
   const existed = await pathExists(paths.configPath);
   try {
+    const hookDefaults = {
+      sessionStartEnabled: true,
+      userPromptSubmitEnabled: true,
+      stopSyncEnabled: false,
+      stopMemoryExtractionEnabled: false,
+    };
     const previous = existed
       ? await loadConfig({ configPath: paths.configPath, env: {} })
-      : {};
+      : hookDefaults;
+    const hookOverrides = {};
+    for (const key of Object.keys(hookDefaults)) {
+      if (options[key] === undefined) continue;
+      if (typeof options[key] !== "boolean") {
+        fail("安装功能开关值无效", EXIT_CODES.INVALID_INPUT, "invalid_install_config");
+      }
+      hookOverrides[key] = options[key];
+    }
     return {
       existed,
       value: normalizeConfig({
         ...previous,
         baseUrl: options.baseUrl,
         apiKey: options.apiKey,
+        ...hookOverrides,
       }),
     };
   } catch (error) {
@@ -918,6 +933,12 @@ async function installOrUpgrade(operation, options, dependencies, paths) {
       prerequisites: prepared.prerequisites,
       configPath: operation === "install" ? paths.configPath : undefined,
       configurationWillBeUpdated: operation === "install",
+      hooks: operation === "install" ? {
+        sessionStart: installConfig.value.sessionStartEnabled,
+        userPromptSubmit: installConfig.value.userPromptSubmitEnabled,
+        stopSync: installConfig.value.stopSyncEnabled,
+        stopMemoryExtraction: installConfig.value.stopMemoryExtractionEnabled,
+      } : undefined,
     });
   }
   const releaseLock = await acquireLock(paths);
@@ -1221,7 +1242,17 @@ export function renderLifecycleResult(result) {
   if (result.prerequisites?.nodeVersion) lines.push(`Node.js：${result.prerequisites.nodeVersion}`);
   if (result.prerequisites?.qoderVersion) lines.push(`Qoder CLI：${result.prerequisites.qoderVersion}`);
   if (result.configPath) lines.push(`配置目标：${result.configPath}`);
-  if (result.configurationWillBeUpdated) lines.push("将写入服务地址和 API Key，并保留已有功能开关。");
+  if (result.configurationWillBeUpdated) lines.push("将写入服务地址和 API Key，并按下列自动能力开关更新配置。");
+  if (result.hooks) {
+    const label = (value) => value ? "开启" : "关闭";
+    lines.push(
+      "自动能力：",
+      `- 会话开始时加载上下文：${label(result.hooks.sessionStart)}`,
+      `- 根据当前问题召回相关内容：${label(result.hooks.userPromptSubmit)}`,
+      `- 每轮结束后同步对话：${label(result.hooks.stopSync)}`,
+      `- 每轮结束后保存长期记忆：${label(result.hooks.stopMemoryExtraction)}`,
+    );
+  }
   if (result.dataPreserved) lines.push("业务配置和运行数据：已保留");
   if (result.modifiedMcpPreserved) lines.push("提示：MCP 配置已被用户修改，因此未删除");
   if (result.restartRequired) lines.push("请完整重启 Qoder IDE 使变更生效。");

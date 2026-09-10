@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
   access,
+  chmod,
   mkdir,
   mkdtemp,
   readFile,
@@ -10,9 +11,10 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
+import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
@@ -252,7 +254,7 @@ test("formal install registers the user plugin and IDE MCP idempotently", async 
     apiKey: INSTALL_CREDENTIALS.apiKey,
     timeoutMs: 8000,
     sessionStartEnabled: true,
-    userPromptSubmitEnabled: false,
+    userPromptSubmitEnabled: true,
     stopSyncEnabled: false,
     stopMemoryExtractionEnabled: false,
   });
@@ -261,6 +263,26 @@ test("formal install registers the user plugin and IDE MCP idempotently", async 
   const second = await runLifecycleCommand("install", options, current.dependencies);
   assert.equal(second.status, "already_installed");
   assert.equal(current.qoder.state.calls.filter((call) => call[1] === "plugins" && call[2] === "install").length, 1);
+});
+
+test("first install accepts explicit Hook overrides", async () => {
+  const current = await fixture();
+  const source = await createPluginSource(current.home, "1.0.0");
+  await runLifecycleCommand("install", installOptions({
+    sourceDir: source,
+    manifest: manifest("1.0.0"),
+    paths: current.paths,
+    sessionStartEnabled: false,
+    userPromptSubmitEnabled: false,
+    stopSyncEnabled: true,
+    stopMemoryExtractionEnabled: true,
+  }), current.dependencies);
+
+  const config = JSON.parse(await readFile(current.paths.configPath, "utf8"));
+  assert.equal(config.sessionStartEnabled, false);
+  assert.equal(config.userPromptSubmitEnabled, false);
+  assert.equal(config.stopSyncEnabled, true);
+  assert.equal(config.stopMemoryExtractionEnabled, true);
 });
 
 test("formal install refuses an externally owned Context Service plugin", async () => {
@@ -442,6 +464,36 @@ test("default uninstall preserves data and a user-modified MCP registration", as
   assert.deepEqual(current.qoder.state.mcp.args, ["/user/modified/bridge.mjs"]);
 });
 
+test("reinstall overrides only explicitly selected Hook switches", async () => {
+  const current = await fixture();
+  const source = await createPluginSource(current.home, "1.0.0");
+  await mkdir(path.dirname(current.paths.configPath), { recursive: true });
+  await writeFile(current.paths.configPath, JSON.stringify({
+    baseUrl: "https://old.example.com",
+    apiKey: "old-secret",
+    timeoutMs: 4321,
+    sessionStartEnabled: false,
+    userPromptSubmitEnabled: false,
+    stopSyncEnabled: true,
+    stopMemoryExtractionEnabled: true,
+  }), { mode: 0o600 });
+
+  await runLifecycleCommand("install", installOptions({
+    sourceDir: source,
+    manifest: manifest("1.0.0"),
+    paths: current.paths,
+    userPromptSubmitEnabled: true,
+    stopMemoryExtractionEnabled: false,
+  }), current.dependencies);
+
+  const config = JSON.parse(await readFile(current.paths.configPath, "utf8"));
+  assert.equal(config.timeoutMs, 4321);
+  assert.equal(config.sessionStartEnabled, false);
+  assert.equal(config.userPromptSubmitEnabled, true);
+  assert.equal(config.stopSyncEnabled, true);
+  assert.equal(config.stopMemoryExtractionEnabled, false);
+});
+
 test("purge requires confirmation and removes only known Context Service data", async () => {
   const current = await fixture();
   const source = await createPluginSource(current.home, "1.0.0");
@@ -476,6 +528,12 @@ test("dry-run performs no Qoder registration or filesystem commit", async () => 
     dryRun: true,
   }), current.dependencies);
   assert.equal(result.status, "dry_run");
+  assert.deepEqual(result.hooks, {
+    sessionStart: true,
+    userPromptSubmit: true,
+    stopSync: false,
+    stopMemoryExtraction: false,
+  });
   assert.equal(current.qoder.state.plugin, null);
   assert.equal(await readInstallState(current.paths), null);
   await assert.rejects(access(current.paths.stateRoot));
@@ -673,8 +731,255 @@ test("POSIX installer dry-run performs no download or local write", async () => 
   assert.equal(output.status, "dry_run");
   assert.equal(output.agent, "qoder");
   assert.equal(output.configurationWillBeUpdated, true);
+  assert.deepEqual(output.hooks, {
+    sessionStart: true,
+    userPromptSubmit: true,
+    stopSync: false,
+    stopMemoryExtraction: false,
+  });
   assert.doesNotMatch(`${result.stdout}${result.stderr}`, new RegExp(secret));
   assert.deepEqual(await readdir(home), []);
+});
+
+test("POSIX installer dry-run resolves explicit Hook overrides", async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "context-service-installer-hook-dry-run-"));
+  const result = spawnSync("sh", [
+    path.join(pluginsRoot, "install.sh"),
+    "--agent", "qoder",
+    "--base-url", "http://127.0.0.1:65535",
+    "--api-key", "hook-dry-run-secret",
+    "--disable-session-start",
+    "--disable-prompt-hook",
+    "--enable-stop-sync",
+    "--enable-stop-memory-extraction",
+    "--dry-run",
+    "--json",
+  ], {
+    encoding: "utf8",
+    env: { ...process.env, HOME: home, XDG_CONFIG_HOME: path.join(home, "config") },
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout).hooks, {
+    sessionStart: false,
+    userPromptSubmit: false,
+    stopSync: true,
+    stopMemoryExtraction: true,
+  });
+  assert.doesNotMatch(`${result.stdout}${result.stderr}`, /hook-dry-run-secret/);
+  assert.deepEqual(await readdir(home), []);
+});
+
+test("POSIX installer dry-run preserves omitted Hook switches from existing config", async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "context-service-installer-existing-config-"));
+  const configPath = path.join(home, "config", "context-service", "qoder.json");
+  const original = `${JSON.stringify({
+    baseUrl: "https://old.example.com",
+    apiKey: "old-secret",
+    timeoutMs: 4321,
+    sessionStartEnabled: false,
+    userPromptSubmitEnabled: false,
+    stopSyncEnabled: true,
+    stopMemoryExtractionEnabled: true,
+  }, null, 2)}\n`;
+  await mkdir(path.dirname(configPath), { recursive: true });
+  await writeFile(configPath, original, { mode: 0o600 });
+
+  const result = spawnSync("sh", [
+    path.join(pluginsRoot, "install.sh"),
+    "--agent", "qoder",
+    "--base-url", "http://127.0.0.1:65535",
+    "--api-key", "replacement-secret",
+    "--enable-prompt-hook",
+    "--disable-stop-memory-extraction",
+    "--dry-run",
+    "--json",
+  ], {
+    encoding: "utf8",
+    env: { ...process.env, HOME: home, XDG_CONFIG_HOME: path.join(home, "config") },
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout).hooks, {
+    sessionStart: false,
+    userPromptSubmit: true,
+    stopSync: true,
+    stopMemoryExtraction: false,
+  });
+  assert.equal(await readFile(configPath, "utf8"), original);
+  assert.doesNotMatch(`${result.stdout}${result.stderr}`, /old-secret|replacement-secret/);
+});
+
+test("built one-click installer writes the reviewed default Hook switches", async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "context-service-installer-e2e-"));
+  const releaseRoot = path.join(home, "release");
+  execFileSync(process.execPath, [
+    path.join(pluginsRoot, "build-release.mjs"),
+    "--agent", "qoder",
+    "--version", "1.0.0",
+    "--out-dir", releaseRoot,
+  ]);
+  const manifestPath = path.join(releaseRoot, "qoder", "stable", "latest.json");
+  const artifactPath = path.join(
+    releaseRoot,
+    "qoder",
+    "releases",
+    "1.0.0",
+    "context-service-qoder-1.0.0.zip",
+  );
+  const fakeBin = path.join(home, "fake-bin");
+  await mkdir(fakeBin, { recursive: true });
+  const fakeCurl = path.join(fakeBin, "curl");
+  const fakeQoder = path.join(fakeBin, "qodercli");
+  await writeFile(fakeCurl, `#!/bin/sh
+set -eu
+output=""
+url=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --output) shift; output="$1" ;;
+    https://*) url="$1" ;;
+  esac
+  shift
+done
+case "$url" in
+  *.json) cp "$FAKE_RELEASE_MANIFEST" "$output" ;;
+  *.zip) cp "$FAKE_RELEASE_ARTIFACT" "$output" ;;
+  *) exit 1 ;;
+esac
+`);
+  await writeFile(fakeQoder, `#!/bin/sh
+set -eu
+if [ "$1" = "--version" ]; then echo "1.1.30"; exit 0; fi
+if [ "$1" = "plugins" ] && [ "$2" = "list" ]; then echo "[]"; exit 0; fi
+if [ "$1" = "plugins" ] && [ "$2" = "validate" ]; then echo "valid"; exit 0; fi
+if [ "$1" = "plugins" ] && [ "$2" = "install" ]; then
+  printf '{"pluginId":"context-service@local","installPath":"%s"}\n' "$3"
+  exit 0
+fi
+if [ "$1" = "plugins" ] && [ "$2" = "uninstall" ]; then exit 0; fi
+if [ "$1" = "mcp" ] && [ "$2" = "get" ]; then
+  if [ -f "$FAKE_QODER_MCP_STATE" ]; then
+    cat "$FAKE_QODER_MCP_STATE"
+  else
+    echo 'Server "context-service" not found in user settings.'
+  fi
+  exit 0
+fi
+if [ "$1" = "mcp" ] && [ "$2" = "add" ]; then
+  printf '{"context-service":{"command":"%s","args":["%s"]}}\n' "$6" "$7" > "$FAKE_QODER_MCP_STATE"
+  echo "added"
+  exit 0
+fi
+if [ "$1" = "mcp" ] && [ "$2" = "remove" ]; then
+  rm -f "$FAKE_QODER_MCP_STATE"
+  echo "removed"
+  exit 0
+fi
+exit 1
+`);
+  await chmod(fakeCurl, 0o755);
+  await chmod(fakeQoder, 0o755);
+
+  const tools = [
+    "save_memory",
+    "recall_memory",
+    "list_memories",
+    "delete_memory",
+    "search_knowledge",
+    "list_knowledge",
+    "rules_get",
+    "rules_check",
+    "session_history",
+    "session_search",
+    "event_emit",
+    "event_query",
+  ];
+  const server = createServer(async (request, response) => {
+    const send = (status, body) => {
+      response.writeHead(status, { "content-type": "application/json" });
+      response.end(body === undefined ? "" : JSON.stringify(body));
+    };
+    if (request.method === "GET" && request.url === "/health") {
+      send(200, { status: "ok", memory: { backend: "mem0" } });
+      return;
+    }
+    if (request.method === "POST" && request.url === "/v1/assemble") {
+      send(200, { system_prompt_block: "", token_estimate: 0, request_id: "e2e" });
+      return;
+    }
+    if (request.method === "POST" && request.url === "/mcp/") {
+      const chunks = [];
+      for await (const chunk of request) chunks.push(chunk);
+      const message = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      if (message.method === "initialize") {
+        send(200, {
+          jsonrpc: "2.0",
+          id: message.id,
+          result: { protocolVersion: "2025-06-18", capabilities: {}, serverInfo: {} },
+        });
+        return;
+      }
+      if (message.method === "tools/list") {
+        send(200, {
+          jsonrpc: "2.0",
+          id: message.id,
+          result: { tools: tools.map((name) => ({ name, inputSchema: { type: "object" } })) },
+        });
+        return;
+      }
+      send(204);
+      return;
+    }
+    send(404, { detail: "not found" });
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+
+  try {
+    const address = server.address();
+    const installResult = await new Promise((resolve) => {
+      const child = spawn("sh", [
+        path.join(releaseRoot, "install.sh"),
+        "--agent", "qoder",
+        "--base-url", `http://127.0.0.1:${address.port}`,
+        "--api-key", "one-click-e2e-secret",
+        "--json",
+      ], {
+        env: {
+          ...process.env,
+          PATH: `${fakeBin}${path.delimiter}${process.env.PATH}`,
+          HOME: home,
+          XDG_BIN_HOME: path.join(home, "bin"),
+          XDG_CONFIG_HOME: path.join(home, "config"),
+          XDG_DATA_HOME: path.join(home, "data"),
+          XDG_STATE_HOME: path.join(home, "state"),
+          CONTEXT_SERVICE_RELEASE_BASE_URL: "https://release.example.com",
+          FAKE_RELEASE_MANIFEST: manifestPath,
+          FAKE_RELEASE_ARTIFACT: artifactPath,
+          FAKE_QODER_MCP_STATE: path.join(home, "qoder-mcp.json"),
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      let stdout = "";
+      let stderr = "";
+      child.stdout.on("data", (chunk) => { stdout += chunk; });
+      child.stderr.on("data", (chunk) => { stderr += chunk; });
+      child.on("close", (status) => resolve({ status, stdout, stderr }));
+    });
+    assert.equal(installResult.status, 0, installResult.stderr);
+    assert.doesNotMatch(`${installResult.stdout}${installResult.stderr}`, /one-click-e2e-secret/);
+    const config = JSON.parse(await readFile(
+      path.join(home, "config", "context-service", "qoder.json"),
+      "utf8",
+    ));
+    assert.equal(config.sessionStartEnabled, true);
+    assert.equal(config.userPromptSubmitEnabled, true);
+    assert.equal(config.stopSyncEnabled, false);
+    assert.equal(config.stopMemoryExtractionEnabled, false);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
 });
 
 test("release builder rejects missing, duplicate, and unsupported agents", () => {
@@ -718,6 +1023,19 @@ test("POSIX installer rejects missing, duplicate, and unsupported agents before 
   });
   assert.equal(duplicate.status, 2);
   assert.match(duplicate.stderr, /--agent 不得重复指定/);
+
+  const conflictingHook = spawnSync("sh", [
+    installer,
+    "--agent", "qoder",
+    "--enable-prompt-hook",
+    "--disable-prompt-hook",
+    ...common,
+  ], {
+    encoding: "utf8",
+    env: { ...process.env, HOME: home, XDG_CONFIG_HOME: path.join(home, "config") },
+  });
+  assert.equal(conflictingHook.status, 2);
+  assert.match(conflictingHook.stderr, /UserPromptSubmit 开关不得重复或冲突/);
   assert.deepEqual(await readdir(home), []);
 });
 

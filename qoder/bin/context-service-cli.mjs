@@ -61,6 +61,31 @@ function argument(name) {
   return values[0];
 }
 
+function booleanSwitch(enableName, disableName, label) {
+  const args = process.argv.slice(2);
+  let enabledCount = 0;
+  let disabledCount = 0;
+  for (const value of args) {
+    if (value === enableName) enabledCount += 1;
+    if (value === disableName) disabledCount += 1;
+    if (value.startsWith(`${enableName}=`) || value.startsWith(`${disableName}=`)) {
+      const error = new Error(`${label} 开关不接受参数值`);
+      error.exitCode = EXIT_CODES.INVALID_INPUT;
+      error.errorType = "invalid_boolean_switch";
+      throw error;
+    }
+  }
+  if (enabledCount + disabledCount > 1) {
+    const error = new Error(`${label} 开关不得重复或冲突`);
+    error.exitCode = EXIT_CODES.INVALID_INPUT;
+    error.errorType = "conflicting_boolean_switch";
+    throw error;
+  }
+  if (enabledCount === 1) return true;
+  if (disabledCount === 1) return false;
+  return undefined;
+}
+
 function lifecycleOptions() {
   return {
     channel: argument("--channel"),
@@ -70,6 +95,26 @@ function lifecycleOptions() {
     targetVersion: argument("--version"),
     baseUrl: argument("--base-url"),
     apiKey: argument("--api-key"),
+    sessionStartEnabled: booleanSwitch(
+      "--enable-session-start",
+      "--disable-session-start",
+      "SessionStart",
+    ),
+    userPromptSubmitEnabled: booleanSwitch(
+      "--enable-prompt-hook",
+      "--disable-prompt-hook",
+      "UserPromptSubmit",
+    ),
+    stopSyncEnabled: booleanSwitch(
+      "--enable-stop-sync",
+      "--disable-stop-sync",
+      "Stop 对话同步",
+    ),
+    stopMemoryExtractionEnabled: booleanSwitch(
+      "--enable-stop-memory-extraction",
+      "--disable-stop-memory-extraction",
+      "Stop 自动记忆抽取",
+    ),
     allowDowngrade: process.argv.includes("--allow-downgrade"),
     dryRun: process.argv.includes("--dry-run"),
     json: process.argv.includes("--json"),

@@ -45,6 +45,20 @@ test("install argument errors use the stable invalid-input exit code", () => {
   assert.equal(duplicate.status, 2);
   assert.equal(JSON.parse(duplicate.stderr).errorType, "duplicate_argument");
   assert.doesNotMatch(`${duplicate.stdout}${duplicate.stderr}`, /test-secret/);
+
+  const conflictingHook = spawnSync(process.execPath, [
+    cliPath,
+    "install",
+    "--dry-run",
+    "--json",
+    "--base-url", "https://context.example.com",
+    "--api-key", "test-secret",
+    "--enable-stop-sync",
+    "--disable-stop-sync",
+  ], { encoding: "utf8" });
+  assert.equal(conflictingHook.status, 2);
+  assert.equal(JSON.parse(conflictingHook.stderr).errorType, "conflicting_boolean_switch");
+  assert.doesNotMatch(`${conflictingHook.stdout}${conflictingHook.stderr}`, /test-secret/);
 });
 
 test("setup accepts --api-key and persists it in the private config", async () => {

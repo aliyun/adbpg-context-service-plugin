@@ -37,6 +37,17 @@ unset CONTEXT_SERVICE_INSTALL_KEY
 
 安装过程会校验版本和下载内容，不需要 `sudo`，并在安装插件、注册 MCP、写入配置和完成只读诊断后才提交安装状态。安装完成后请完整重启 Qoder IDE。
 
+首次一键安装默认开启会话开始上下文和问题相关召回，默认关闭对话同步和自动记忆抽取。可以在安装命令末尾追加以下参数显式调整；同一行中的两个参数只能选择一个：
+
+| 能力 | 开启 | 关闭 |
+|---|---|---|
+| 会话开始上下文 | `--enable-session-start` | `--disable-session-start` |
+| 问题相关召回 | `--enable-prompt-hook` | `--disable-prompt-hook` |
+| 对话同步 | `--enable-stop-sync` | `--disable-stop-sync` |
+| 自动记忆抽取 | `--enable-stop-memory-extraction` | `--disable-stop-memory-extraction` |
+
+已有配置重装时，未指定的开关保留原值，显式指定的开关才会更新。开启自动记忆抽取前，需确认服务端使用支持该能力的记忆后端。
+
 开发期间可以从已校验的本地目录安装：
 
 ```bash
@@ -75,7 +86,7 @@ context-service-cli setup \
 - `--enable-stop-sync`：每轮回答结束后同步本轮对话
 - `--enable-stop-memory-extraction`：每轮回答结束后自动提取长期记忆，要求服务使用 Mem0
 
-会话开始时的基础上下文注入默认开启。其余三个选项默认关闭，可单独开启。
+通过 `setup` 重新生成配置时，会话开始上下文默认开启，其他三个选项默认关闭，可单独开启。正式一键安装的默认值以“安装”一节为准。
 
 ## 使用
 
@@ -162,7 +173,7 @@ context-service-cli uninstall --purge-data --yes
 - API Key 仅用于访问用户配置的 Context Service，不写入 Qoder 工具配置
 - `--api-key` 在安装进程存活期间可能被同机进程观察；应使用隐藏输入变量并在安装后立即清理变量
 - 非本机服务地址必须使用 HTTPS
-- 自动对话同步和长期记忆保存默认关闭
+- 正式一键安装默认开启问题相关召回；自动对话同步和长期记忆保存默认关闭
 - `/context-test` 不执行业务写入
 - 写工具不会被安装器预授权
 - 服务不可用时自动能力安全降级，不阻断 Qoder

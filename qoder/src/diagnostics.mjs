@@ -267,6 +267,7 @@ export function renderHelp() {
     "插件支持自动加载上下文、召回相关内容和处理每轮对话，并提供 12 个按需工具。",
     "管理命令：context-service-cli <install|upgrade|uninstall|version|doctor>",
     "管理参数：--dry-run、--json；卸载数据使用 --purge-data --yes",
+    "安装时可以分别启用或关闭会话开始、问题召回、对话同步和自动记忆抽取。",
     "安全提醒：不要在聊天消息中粘贴 API Key。",
     "",
   ].join("\n");
