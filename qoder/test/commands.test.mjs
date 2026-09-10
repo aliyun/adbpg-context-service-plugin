@@ -21,7 +21,8 @@ for (const name of commands) {
     const source = await readFile(path.join(pluginRoot, "commands", `${name}.md`), "utf8");
     assert.match(source, new RegExp(`name: ${name}`));
     assert.match(source, /description: [^\x00-\x7F]+/u);
-    assert.match(source, /context-service-qoder/);
+    assert.match(source, /context-service-cli/);
+    assert.equal(source.includes(["context-service", "qoder"].join("-")), false);
     assert.match(source, /标准输出逐字作为最终回答/);
     assert.match(source, /不得添加标题、表格、解释、总结/);
     assert.doesNotMatch(source, /\.mjs\b|QODER_PLUGIN_ROOT|installPath|persona_get/);

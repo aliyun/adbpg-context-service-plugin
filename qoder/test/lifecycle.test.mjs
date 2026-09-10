@@ -28,6 +28,14 @@ import {
 } from "../src/lifecycle.mjs";
 
 const pluginRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const INSTALL_CREDENTIALS = Object.freeze({
+  baseUrl: "https://context.example.com",
+  apiKey: "sk-install-test-secret",
+});
+
+function installOptions(options) {
+  return { ...INSTALL_CREDENTIALS, ...options };
+}
 
 function manifest(version) {
   return {
@@ -56,7 +64,7 @@ async function createPluginSource(root, version) {
     version,
   }));
   await writeFile(path.join(source, "bin", "context-service-mcp-bridge.mjs"), "// test\n");
-  await writeFile(path.join(source, "bin", "context-service-qoder.mjs"), "// test\n");
+  await writeFile(path.join(source, "bin", "context-service-cli.mjs"), "// test\n");
   return source;
 }
 
@@ -137,6 +145,8 @@ async function fixture() {
       homeDirectory: home,
       platform: "darwin",
       commandRunner: qoder.runner,
+      commandExists: () => true,
+      runDiagnostics: async () => ({ ok: true, steps: [] }),
     },
   };
 }
@@ -197,7 +207,12 @@ test("a malicious install state cannot redirect lifecycle paths", async () => {
 test("formal install registers the user plugin and IDE MCP idempotently", async () => {
   const current = await fixture();
   const source = await createPluginSource(current.home, "1.0.0");
-  const options = { sourceDir: source, manifest: manifest("1.0.0"), paths: current.paths };
+  const options = installOptions({ sourceDir: source, manifest: manifest("1.0.0"), paths: current.paths });
+  let transactionDuringDiagnostics;
+  current.dependencies.runDiagnostics = async () => {
+    transactionDuringDiagnostics = await readFile(current.paths.transactionPath, "utf8");
+    return { ok: true, steps: [] };
+  };
 
   const installed = await runLifecycleCommand("install", options, current.dependencies);
   assert.equal(installed.status, "installed");
@@ -210,7 +225,19 @@ test("formal install registers the user plugin and IDE MCP idempotently", async 
   const state = await readInstallState(current.paths);
   assert.equal(state.version, "1.0.0");
   assert.doesNotMatch(JSON.stringify(state), /apiKey|Authorization|Bearer|sk-/i);
+  assert.doesNotMatch(transactionDuringDiagnostics, /apiKey|Authorization|Bearer|sk-install-test-secret/i);
   assert.equal((await stat(current.paths.commandPath)).mode & 0o777, 0o755);
+  const config = JSON.parse(await readFile(current.paths.configPath, "utf8"));
+  assert.deepEqual(config, {
+    baseUrl: INSTALL_CREDENTIALS.baseUrl,
+    apiKey: INSTALL_CREDENTIALS.apiKey,
+    timeoutMs: 8000,
+    sessionStartEnabled: true,
+    userPromptSubmitEnabled: false,
+    stopSyncEnabled: false,
+    stopMemoryExtractionEnabled: false,
+  });
+  assert.equal((await stat(current.paths.configPath)).mode & 0o777, 0o600);
 
   const second = await runLifecycleCommand("install", options, current.dependencies);
   assert.equal(second.status, "already_installed");
@@ -228,11 +255,11 @@ test("formal install refuses an externally owned Context Service plugin", async 
     installPath: "/user/manual/context-service",
   };
   await assert.rejects(
-    runLifecycleCommand("install", {
+    runLifecycleCommand("install", installOptions({
       sourceDir: source,
       manifest: manifest("1.0.0"),
       paths: current.paths,
-    }, current.dependencies),
+    }), current.dependencies),
     { exitCode: EXIT_CODES.QODER_REGISTRATION, errorType: "plugin_conflict" },
   );
   assert.equal(current.qoder.state.plugin.version, "9.9.9");
@@ -244,24 +271,24 @@ test("a live lifecycle lock rejects a concurrent mutation", async () => {
   await mkdir(current.paths.lockPath, { recursive: true });
   await writeFile(path.join(current.paths.lockPath, "owner.json"), JSON.stringify({ pid: process.pid }));
   await assert.rejects(
-    runLifecycleCommand("install", {
+    runLifecycleCommand("install", installOptions({
       sourceDir: source,
       manifest: manifest("1.0.0"),
       paths: current.paths,
-    }, current.dependencies),
+    }), current.dependencies),
     { exitCode: EXIT_CODES.LOCAL_STATE, errorType: "lock_busy" },
   );
 });
 
-test("an explicit target version resolves its immutable manifest", async () => {
+test("an explicit target version dry-run performs no manifest download", async () => {
   const current = await fixture();
   let requestedUrl;
-  const result = await runLifecycleCommand("install", {
+  const result = await runLifecycleCommand("install", installOptions({
     targetVersion: "1.4.0",
     manifestUrl: "https://downloads.example.com/qoder/stable/latest.json",
     paths: current.paths,
     dryRun: true,
-  }, {
+  }), {
     ...current.dependencies,
     fetch: async (url) => {
       requestedUrl = url;
@@ -272,18 +299,20 @@ test("an explicit target version resolves its immutable manifest", async () => {
     },
   });
   assert.equal(result.status, "dry_run");
-  assert.equal(requestedUrl, "https://downloads.example.com/qoder/releases/1.4.0/manifest.json");
+  assert.equal(result.targetVersion, "1.4.0");
+  assert.equal(requestedUrl, undefined);
 });
 
 test("upgrade switches the plugin and MCP path only after validation", async () => {
   const current = await fixture();
   const firstSource = await createPluginSource(current.home, "1.0.0");
   const secondSource = await createPluginSource(current.home, "1.1.0");
-  await runLifecycleCommand("install", {
+  await runLifecycleCommand("install", installOptions({
     sourceDir: firstSource,
     manifest: manifest("1.0.0"),
     paths: current.paths,
-  }, current.dependencies);
+  }), current.dependencies);
+  const configBeforeUpgrade = await readFile(current.paths.configPath, "utf8");
 
   const upgraded = await runLifecycleCommand("upgrade", {
     sourceDir: secondSource,
@@ -294,13 +323,18 @@ test("upgrade switches the plugin and MCP path only after validation", async () 
   assert.equal(upgraded.previousVersion, "1.0.0");
   assert.equal((await readInstallState(current.paths)).version, "1.1.0");
   assert.match(current.qoder.state.mcp.args[0], /\/1\.1\.0\/bin\/context-service-mcp-bridge\.mjs$/);
+  assert.equal(await readFile(current.paths.configPath, "utf8"), configBeforeUpgrade);
 });
 
 test("successful upgrades retain only the current and previous versions", async () => {
   const current = await fixture();
   for (const version of ["1.0.0", "1.1.0", "1.2.0"]) {
     const source = await createPluginSource(current.home, version);
-    await runLifecycleCommand(version === "1.0.0" ? "install" : "upgrade", {
+    await runLifecycleCommand(version === "1.0.0" ? "install" : "upgrade", version === "1.0.0" ? installOptions({
+      sourceDir: source,
+      manifest: manifest(version),
+      paths: current.paths,
+    }) : {
       sourceDir: source,
       manifest: manifest(version),
       paths: current.paths,
@@ -313,11 +347,11 @@ test("upgrade restores the committed plugin and MCP when registration fails", as
   const current = await fixture();
   const firstSource = await createPluginSource(current.home, "1.0.0");
   const secondSource = await createPluginSource(current.home, "2.0.0");
-  await runLifecycleCommand("install", {
+  await runLifecycleCommand("install", installOptions({
     sourceDir: firstSource,
     manifest: manifest("1.0.0"),
     paths: current.paths,
-  }, current.dependencies);
+  }), current.dependencies);
   current.qoder.state.failMcpAdds = 1;
 
   await assert.rejects(
@@ -337,11 +371,11 @@ test("upgrade refuses downgrade unless it is explicit", async () => {
   const current = await fixture();
   const firstSource = await createPluginSource(current.home, "2.0.0");
   const oldSource = await createPluginSource(current.home, "1.0.0");
-  await runLifecycleCommand("install", {
+  await runLifecycleCommand("install", installOptions({
     sourceDir: firstSource,
     manifest: manifest("2.0.0"),
     paths: current.paths,
-  }, current.dependencies);
+  }), current.dependencies);
   await assert.rejects(
     runLifecycleCommand("upgrade", {
       sourceDir: oldSource,
@@ -356,12 +390,28 @@ test("default uninstall preserves data and a user-modified MCP registration", as
   const current = await fixture();
   const source = await createPluginSource(current.home, "1.0.0");
   await mkdir(path.dirname(current.paths.configPath), { recursive: true });
-  await writeFile(current.paths.configPath, JSON.stringify({ apiKey: "secret-test-value" }));
-  await runLifecycleCommand("install", {
+  await writeFile(current.paths.configPath, JSON.stringify({
+    baseUrl: "https://old.example.com",
+    apiKey: "old-secret",
+    timeoutMs: 4321,
+    sessionStartEnabled: false,
+    userPromptSubmitEnabled: true,
+    stopSyncEnabled: true,
+    stopMemoryExtractionEnabled: true,
+  }));
+  await runLifecycleCommand("install", installOptions({
     sourceDir: source,
     manifest: manifest("1.0.0"),
     paths: current.paths,
-  }, current.dependencies);
+  }), current.dependencies);
+  const updatedConfig = JSON.parse(await readFile(current.paths.configPath, "utf8"));
+  assert.equal(updatedConfig.baseUrl, INSTALL_CREDENTIALS.baseUrl);
+  assert.equal(updatedConfig.apiKey, INSTALL_CREDENTIALS.apiKey);
+  assert.equal(updatedConfig.timeoutMs, 4321);
+  assert.equal(updatedConfig.sessionStartEnabled, false);
+  assert.equal(updatedConfig.userPromptSubmitEnabled, true);
+  assert.equal(updatedConfig.stopSyncEnabled, true);
+  assert.equal(updatedConfig.stopMemoryExtractionEnabled, true);
   current.qoder.state.mcp.args = ["/user/modified/bridge.mjs"];
 
   const result = await runLifecycleCommand("uninstall", { paths: current.paths }, current.dependencies);
@@ -377,13 +427,12 @@ test("purge requires confirmation and removes only known Context Service data", 
   const current = await fixture();
   const source = await createPluginSource(current.home, "1.0.0");
   await mkdir(path.dirname(current.paths.configPath), { recursive: true });
-  await writeFile(current.paths.configPath, "{}\n");
   await writeFile(current.paths.turnStatePath, "{}\n");
-  await runLifecycleCommand("install", {
+  await runLifecycleCommand("install", installOptions({
     sourceDir: source,
     manifest: manifest("1.0.0"),
     paths: current.paths,
-  }, current.dependencies);
+  }), current.dependencies);
   await assert.rejects(
     runLifecycleCommand("uninstall", { paths: current.paths, purgeData: true }, current.dependencies),
     { exitCode: EXIT_CODES.INVALID_INPUT },
@@ -401,12 +450,12 @@ test("purge requires confirmation and removes only known Context Service data", 
 test("dry-run performs no Qoder registration or filesystem commit", async () => {
   const current = await fixture();
   const source = await createPluginSource(current.home, "1.0.0");
-  const result = await runLifecycleCommand("install", {
+  const result = await runLifecycleCommand("install", installOptions({
     sourceDir: source,
     manifest: manifest("1.0.0"),
     paths: current.paths,
     dryRun: true,
-  }, current.dependencies);
+  }), current.dependencies);
   assert.equal(result.status, "dry_run");
   assert.equal(current.qoder.state.plugin, null);
   assert.equal(await readInstallState(current.paths), null);
@@ -416,11 +465,11 @@ test("dry-run performs no Qoder registration or filesystem commit", async () => 
 test("an interrupted upgrade is recovered before the next operation", async () => {
   const current = await fixture();
   const source = await createPluginSource(current.home, "1.0.0");
-  await runLifecycleCommand("install", {
+  await runLifecycleCommand("install", installOptions({
     sourceDir: source,
     manifest: manifest("1.0.0"),
     paths: current.paths,
-  }, current.dependencies);
+  }), current.dependencies);
   const committed = await readInstallState(current.paths);
   await writeFile(current.paths.transactionPath, `${JSON.stringify({
     schemaVersion: 1,
@@ -431,11 +480,11 @@ test("an interrupted upgrade is recovered before the next operation", async () =
   current.qoder.state.plugin = null;
   current.qoder.state.mcp = null;
 
-  const result = await runLifecycleCommand("install", {
+  const result = await runLifecycleCommand("install", installOptions({
     sourceDir: source,
     manifest: manifest("1.0.0"),
     paths: current.paths,
-  }, current.dependencies);
+  }), current.dependencies);
   assert.equal(result.status, "already_installed");
   assert.equal(current.qoder.state.plugin.version, "1.0.0");
   assert.match(current.qoder.state.mcp.args[0], /\/1\.0\.0\/bin\/context-service-mcp-bridge\.mjs$/);
@@ -457,13 +506,15 @@ test("machine-readable errors redact credentials", () => {
 test("release builder produces a manifest whose size and digest match the ZIP", async () => {
   const outputRoot = await mkdtemp(path.join(os.tmpdir(), "context-service-release-test-"));
   const result = spawnSync(process.execPath, [
-    path.join(pluginRoot, "scripts", "build-release.mjs"),
+    path.join(pluginRoot, "..", "build-release.mjs"),
     "--version", "1.2.3",
     "--base-url", "https://downloads.example.com/qoder",
     "--out-dir", outputRoot,
   ], { encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
   const release = JSON.parse(result.stdout);
+  assert.equal(path.basename(release.artifactPath), "context-service-client-1.2.3.zip");
+  assert.match(release.manifest.artifact_url, /\/context-service-client-1\.2\.3\.zip$/);
   const artifact = await readFile(release.artifactPath);
   assert.equal(artifact.length, release.manifest.artifact_size);
   assert.equal(createHash("sha256").update(artifact).digest("hex"), release.manifest.artifact_sha256);
@@ -477,6 +528,8 @@ test("release builder produces a manifest whose size and digest match the ZIP", 
     encoding: "utf8",
   });
   assert.doesNotMatch(archiveEntries, /DEVELOPMENT\.md/);
+  assert.match(archiveEntries, /plugin\/bin\/context-service-cli\.mjs/);
+  assert.equal(archiveEntries.includes(`plugin/bin/${["context-service", "qoder"].join("-")}.mjs`), false);
   for (const relativePath of [
     "README.md",
     "PRIVACY.md",
@@ -502,7 +555,7 @@ test("release builder produces a manifest whose size and digest match the ZIP", 
 test("a built ZIP passes the real safe extraction path", async () => {
   const outputRoot = await mkdtemp(path.join(os.tmpdir(), "context-service-release-install-test-"));
   const build = spawnSync(process.execPath, [
-    path.join(pluginRoot, "scripts", "build-release.mjs"),
+    path.join(pluginRoot, "..", "build-release.mjs"),
     "--version", "1.3.0",
     "--base-url", "https://downloads.example.com/qoder",
     "--out-dir", outputRoot,
@@ -514,10 +567,10 @@ test("a built ZIP passes the real safe extraction path", async () => {
   const commandRunner = (command, args) => command === "unzip"
     ? execFileSync(command, args, { encoding: "utf8" }).trim()
     : current.qoder.runner(command, args);
-  const result = await runLifecycleCommand("install", {
+  const result = await runLifecycleCommand("install", installOptions({
     manifest: release.manifest,
     paths: current.paths,
-  }, {
+  }), {
     ...current.dependencies,
     commandRunner,
     fetch: async () => new Response(artifact, {
@@ -546,7 +599,7 @@ test("ZIP symbolic links are rejected before extraction", async () => {
     ? execFileSync(command, args, { encoding: "utf8" }).trim()
     : current.qoder.runner(command, args);
   await assert.rejects(
-    runLifecycleCommand("install", { manifest: unsafeManifest, paths: current.paths }, {
+    runLifecycleCommand("install", installOptions({ manifest: unsafeManifest, paths: current.paths }), {
       ...current.dependencies,
       commandRunner,
       fetch: async () => new Response(artifact, {
@@ -558,10 +611,175 @@ test("ZIP symbolic links are rejected before extraction", async () => {
   );
 });
 
-test("POSIX installer is syntactically valid and never accepts an API key", async () => {
+test("POSIX installer is syntactically valid and requires one-click credentials", async () => {
   const installerPath = path.join(pluginRoot, "install.sh");
   const result = spawnSync("sh", ["-n", installerPath], { encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
   const source = await readFile(installerPath, "utf8");
-  assert.doesNotMatch(source, /--api-key|CONTEXT_SERVICE_API_KEY/);
+  assert.match(source, /--base-url/);
+  assert.match(source, /--api-key/);
+  assert.doesNotMatch(source, /CONTEXT_SERVICE_API_KEY/);
+});
+
+test("POSIX installer dry-run performs no download or local write", async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "context-service-installer-dry-run-"));
+  const secret = "installer-dry-run-secret";
+  const result = spawnSync("sh", [
+    path.join(pluginRoot, "install.sh"),
+    "--base-url", "http://127.0.0.1:65535",
+    "--api-key", secret,
+    "--dry-run",
+    "--json",
+  ], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      HOME: home,
+      XDG_CONFIG_HOME: path.join(home, "config"),
+      CONTEXT_SERVICE_QODER_RELEASE_MANIFEST_URL: "https://127.0.0.1:1/must-not-be-requested.json",
+    },
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const output = JSON.parse(result.stdout);
+  assert.equal(output.status, "dry_run");
+  assert.equal(output.configurationWillBeUpdated, true);
+  assert.doesNotMatch(`${result.stdout}${result.stderr}`, new RegExp(secret));
+  assert.deepEqual(await readdir(home), []);
+});
+
+test("install rejects missing credentials before download or filesystem writes", async () => {
+  const current = await fixture();
+  let fetchCalls = 0;
+  await assert.rejects(
+    runLifecycleCommand("install", { paths: current.paths }, {
+      ...current.dependencies,
+      fetch: async () => {
+        fetchCalls += 1;
+        throw new Error("must not fetch");
+      },
+    }),
+    { exitCode: EXIT_CODES.INVALID_INPUT, errorType: "base_url_required" },
+  );
+  assert.equal(fetchCalls, 0);
+  assert.equal(current.qoder.state.calls.length, 0);
+  await assert.rejects(access(current.paths.stateRoot));
+});
+
+test("install rejects an unsafe URL and blank API key before lifecycle mutation", async () => {
+  const current = await fixture();
+  await assert.rejects(
+    runLifecycleCommand("install", {
+      baseUrl: "http://context.example.com",
+      apiKey: "secret",
+      paths: current.paths,
+      dryRun: true,
+    }, current.dependencies),
+    { exitCode: EXIT_CODES.INVALID_INPUT, errorType: "invalid_install_config" },
+  );
+  await assert.rejects(
+    runLifecycleCommand("install", {
+      baseUrl: "https://context.example.com",
+      apiKey: "   ",
+      paths: current.paths,
+      dryRun: true,
+    }, current.dependencies),
+    { exitCode: EXIT_CODES.INVALID_INPUT, errorType: "api_key_required" },
+  );
+  assert.equal(current.qoder.state.calls.length, 0);
+  await assert.rejects(access(current.paths.stateRoot));
+});
+
+test("config write failure rolls back plugin MCP and staged version", async () => {
+  const current = await fixture();
+  const source = await createPluginSource(current.home, "1.0.0");
+  await assert.rejects(runLifecycleCommand("install", installOptions({
+    sourceDir: source,
+    manifest: manifest("1.0.0"),
+    paths: current.paths,
+  }), {
+    ...current.dependencies,
+    writeConfig: async () => {
+      throw new Error("injected config write failure");
+    },
+  }));
+  assert.equal(current.qoder.state.plugin, null);
+  assert.equal(current.qoder.state.mcp, null);
+  await assert.rejects(access(path.join(current.paths.versionsRoot, "1.0.0")));
+  await assert.rejects(access(current.paths.configPath));
+  await assert.rejects(access(current.paths.transactionPath));
+});
+
+test("state commit failure rolls back every first-install artifact", async () => {
+  const current = await fixture();
+  const source = await createPluginSource(current.home, "1.0.0");
+  await assert.rejects(runLifecycleCommand("install", installOptions({
+    sourceDir: source,
+    manifest: manifest("1.0.0"),
+    paths: current.paths,
+  }), {
+    ...current.dependencies,
+    writeInstallState: async () => {
+      throw new Error("injected state commit failure");
+    },
+  }));
+  assert.equal(current.qoder.state.plugin, null);
+  assert.equal(current.qoder.state.mcp, null);
+  await assert.rejects(access(current.paths.commandPath));
+  await assert.rejects(access(current.paths.currentPath));
+  await assert.rejects(access(current.paths.configPath));
+  await assert.rejects(access(current.paths.statePath));
+  await assert.rejects(access(current.paths.transactionPath));
+});
+
+test("diagnostic failure restores an existing config and removes a fresh install", async () => {
+  const current = await fixture();
+  const source = await createPluginSource(current.home, "1.0.0");
+  const oldConfig = `${JSON.stringify({
+    baseUrl: "https://old.example.com",
+    apiKey: "old-secret",
+    timeoutMs: 3210,
+    sessionStartEnabled: false,
+    userPromptSubmitEnabled: true,
+    stopSyncEnabled: true,
+    stopMemoryExtractionEnabled: false,
+  }, null, 2)}\n`;
+  await mkdir(path.dirname(current.paths.configPath), { recursive: true });
+  await writeFile(current.paths.configPath, oldConfig, { mode: 0o600 });
+  await assert.rejects(
+    runLifecycleCommand("install", installOptions({
+      sourceDir: source,
+      manifest: manifest("1.0.0"),
+      paths: current.paths,
+    }), {
+      ...current.dependencies,
+      runDiagnostics: async () => ({ ok: false, steps: [] }),
+    }),
+    { exitCode: EXIT_CODES.LOCAL_STATE, errorType: "install_diagnostics_failed" },
+  );
+  assert.equal(await readFile(current.paths.configPath, "utf8"), oldConfig);
+  assert.equal(current.qoder.state.plugin, null);
+  assert.equal(current.qoder.state.mcp, null);
+  assert.equal(await readInstallState(current.paths), null);
+  await assert.rejects(access(current.paths.transactionPath));
+  await assert.rejects(access(current.paths.configBackupPath));
+});
+
+test("diagnostic failure after a first install removes the newly created config", async () => {
+  const current = await fixture();
+  const source = await createPluginSource(current.home, "1.0.0");
+  await assert.rejects(
+    runLifecycleCommand("install", installOptions({
+      sourceDir: source,
+      manifest: manifest("1.0.0"),
+      paths: current.paths,
+    }), {
+      ...current.dependencies,
+      runDiagnostics: async () => ({ ok: false, steps: [] }),
+    }),
+    { exitCode: EXIT_CODES.LOCAL_STATE, errorType: "install_diagnostics_failed" },
+  );
+  await assert.rejects(access(current.paths.configPath));
+  await assert.rejects(access(path.join(current.paths.versionsRoot, "1.0.0")));
+  assert.equal(current.qoder.state.plugin, null);
+  assert.equal(current.qoder.state.mcp, null);
 });

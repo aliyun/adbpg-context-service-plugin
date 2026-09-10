@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { access, mkdtemp, readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
@@ -7,8 +7,8 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const pluginRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const cliPath = path.join(pluginRoot, "bin", "context-service-qoder.mjs");
-const publicCliPath = path.join(pluginRoot, "bin", "context-service-qoder");
+const cliPath = path.join(pluginRoot, "bin", "context-service-cli.mjs");
+const publicCliPath = path.join(pluginRoot, "bin", "context-service-cli");
 
 test("public product command runs without exposing the internal entry", () => {
   const result = spawnSync(publicCliPath, ["help"], {
@@ -20,8 +20,35 @@ test("public product command runs without exposing the internal entry", () => {
   assert.doesNotMatch(`${result.stdout}${result.stderr}`, /\.mjs\b|QODER_PLUGIN_ROOT|persona_get/);
 });
 
+test("legacy public command and entry file are absent", async () => {
+  const oldName = ["context-service", "qoder"].join("-");
+  await assert.rejects(access(path.join(pluginRoot, "bin", oldName)));
+  await assert.rejects(access(path.join(pluginRoot, "bin", `${oldName}.mjs`)));
+});
+
+test("install argument errors use the stable invalid-input exit code", () => {
+  const missing = spawnSync(process.execPath, [cliPath, "install", "--dry-run", "--json"], {
+    encoding: "utf8",
+  });
+  assert.equal(missing.status, 2);
+  assert.equal(JSON.parse(missing.stderr).errorType, "base_url_required");
+
+  const duplicate = spawnSync(process.execPath, [
+    cliPath,
+    "install",
+    "--dry-run",
+    "--json",
+    "--base-url", "https://context.example.com",
+    "--base-url", "https://other.example.com",
+    "--api-key", "test-secret",
+  ], { encoding: "utf8" });
+  assert.equal(duplicate.status, 2);
+  assert.equal(JSON.parse(duplicate.stderr).errorType, "duplicate_argument");
+  assert.doesNotMatch(`${duplicate.stdout}${duplicate.stderr}`, /test-secret/);
+});
+
 test("setup accepts --api-key and persists it in the private config", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "context-service-qoder-cli-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "context-service-cli-"));
   const configPath = path.join(directory, "qoder.json");
   const result = spawnSync(process.execPath, [
     cliPath,
@@ -94,7 +121,7 @@ test("status fails safely when configuration is absent", () => {
 });
 
 test("Stop file failures are fail-open and do not expose conversation text", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "context-service-qoder-stop-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "context-service-cli-stop-"));
   const configPath = path.join(directory, "qoder.json");
   const setupResult = spawnSync(process.execPath, [
     cliPath,

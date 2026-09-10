@@ -6,7 +6,7 @@ import test from "node:test";
 import { defaultConfigPath, loadConfig, saveConfig } from "../src/config.mjs";
 
 test("saveConfig creates a reusable private config", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "context-service-qoder-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "context-service-cli-"));
   const configPath = path.join(directory, "nested", "qoder.json");
 
   await saveConfig({

@@ -1,4 +1,5 @@
-import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -79,14 +80,13 @@ export async function loadConfig(options = {}) {
     configPath,
   };
 
-  if (!config.apiKey || typeof config.apiKey !== "string") {
+  if (typeof config.apiKey !== "string" || config.apiKey.trim() === "") {
     throw new Error("缺少 API Key");
   }
   return Object.freeze(config);
 }
 
-export async function saveConfig(input, options = {}) {
-  const configPath = options.configPath ?? defaultConfigPath(options.env, options.platform);
+export function normalizeConfig(input) {
   const serializable = {
     baseUrl: validateBaseUrl(input.baseUrl),
     apiKey: input.apiKey,
@@ -96,15 +96,27 @@ export async function saveConfig(input, options = {}) {
     stopSyncEnabled: parseBoolean(input.stopSyncEnabled, false),
     stopMemoryExtractionEnabled: parseBoolean(input.stopMemoryExtractionEnabled, false),
   };
-  if (!serializable.apiKey || typeof serializable.apiKey !== "string") {
+  if (typeof serializable.apiKey !== "string" || serializable.apiKey.trim() === "") {
     throw new Error("缺少 API Key");
   }
+  return Object.freeze(serializable);
+}
+
+export async function saveConfig(input, options = {}) {
+  const configPath = options.configPath ?? defaultConfigPath(options.env, options.platform);
+  const serializable = normalizeConfig(input);
 
   await mkdir(path.dirname(configPath), { recursive: true, mode: 0o700 });
-  await writeFile(configPath, `${JSON.stringify(serializable, null, 2)}\n`, {
-    encoding: "utf8",
-    mode: 0o600,
-  });
-  if (process.platform !== "win32") await chmod(configPath, 0o600);
+  const temporaryPath = `${configPath}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(temporaryPath, `${JSON.stringify(serializable, null, 2)}\n`, {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+    if (process.platform !== "win32") await chmod(temporaryPath, 0o600);
+    await rename(temporaryPath, configPath);
+  } finally {
+    await rm(temporaryPath, { force: true });
+  }
   return configPath;
 }

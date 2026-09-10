@@ -16,7 +16,8 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
-const pluginRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const pluginsRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)));
+const pluginRoot = path.join(pluginsRoot, "qoder");
 
 function argument(name, fallback) {
   const index = process.argv.indexOf(name);
@@ -75,9 +76,9 @@ async function main() {
     "--base-url",
     "https://context-database-client.oss-cn-hangzhou.aliyuncs.com/qoder",
   ));
-  const outputRoot = path.resolve(argument("--out-dir", path.join(pluginRoot, "dist")));
+  const outputRoot = path.resolve(argument("--out-dir", path.join(pluginsRoot, "dist")));
   const releaseDirectory = path.join(outputRoot, "releases", version);
-  const artifactName = `context-service-qoder-${version}.zip`;
+  const artifactName = `context-service-client-${version}.zip`;
   const artifactPath = path.join(releaseDirectory, artifactName);
   const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "context-service-release-"));
   const stagedPlugin = path.join(temporaryRoot, "plugin");

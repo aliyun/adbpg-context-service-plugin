@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
+import { accessSync, constants as fsConstants } from "node:fs";
 import {
   chmod,
   cp,
@@ -17,6 +18,8 @@ import {
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
+import { loadConfig, normalizeConfig, saveConfig } from "./config.mjs";
+import { runReadOnlyDiagnostics } from "./diagnostics.mjs";
 import { PLUGIN_VERSION } from "./version.mjs";
 
 export const LIFECYCLE_SCHEMA_VERSION = 1;
@@ -39,9 +42,12 @@ const MCP_NAME = "context-service";
 const MCP_BRIDGE_RELATIVE_PATH = path.join("bin", "context-service-mcp-bridge.mjs");
 const STATE_FILE_NAME = "install.json";
 const TRANSACTION_FILE_NAME = "transaction.json";
+const CONFIG_BACKUP_FILE_NAME = "qoder-config.backup.json";
 const LOCK_DIRECTORY_NAME = "lifecycle.lock";
 const MAX_MANIFEST_BYTES = 128 * 1024;
 const MAX_ARTIFACT_BYTES = 128 * 1024 * 1024;
+const DEFAULT_MIN_NODE_VERSION = "18.0.0";
+const DEFAULT_MIN_QODERCLI_VERSION = "1.1.30";
 
 export class LifecycleError extends Error {
   constructor(message, exitCode, errorType = "lifecycle_error", options = {}) {
@@ -159,13 +165,14 @@ export function lifecyclePaths(env = process.env, homeDirectory = os.homedir()) 
   const stateRoot = path.join(stateHome, "context-service", "qoder");
   return Object.freeze({
     binHome,
-    commandPath: path.join(binHome, "context-service-qoder"),
+    commandPath: path.join(binHome, "context-service-cli"),
     root,
     versionsRoot: path.join(root, "versions"),
     currentPath: path.join(root, "current"),
     stateRoot,
     statePath: path.join(stateRoot, STATE_FILE_NAME),
     transactionPath: path.join(stateRoot, TRANSACTION_FILE_NAME),
+    configBackupPath: path.join(stateRoot, CONFIG_BACKUP_FILE_NAME),
     lockPath: path.join(stateRoot, LOCK_DIRECTORY_NAME),
     configPath: path.join(configHome, "context-service", "qoder.json"),
     turnStatePath: path.join(configHome, "context-service", "context-service-turn-state.json"),
@@ -192,6 +199,74 @@ async function atomicWriteJson(filePath, value, mode = 0o600) {
   await writeFile(temporaryPath, `${JSON.stringify(value, null, 2)}\n`, { mode });
   await chmod(temporaryPath, mode);
   await rename(temporaryPath, filePath);
+}
+
+async function pathExists(filePath) {
+  try {
+    await stat(filePath);
+    return true;
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+async function prepareInstallConfig(options, paths) {
+  if (typeof options.baseUrl !== "string" || options.baseUrl.trim() === "") {
+    fail("install 必须提供 --base-url", EXIT_CODES.INVALID_INPUT, "base_url_required");
+  }
+  if (typeof options.apiKey !== "string" || options.apiKey.trim() === "") {
+    fail("install 必须提供 --api-key", EXIT_CODES.INVALID_INPUT, "api_key_required");
+  }
+  const existed = await pathExists(paths.configPath);
+  try {
+    const previous = existed
+      ? await loadConfig({ configPath: paths.configPath, env: {} })
+      : {};
+    return {
+      existed,
+      value: normalizeConfig({
+        ...previous,
+        baseUrl: options.baseUrl,
+        apiKey: options.apiKey,
+      }),
+    };
+  } catch (error) {
+    fail(error?.message ?? "安装配置无效", EXIT_CODES.INVALID_INPUT, "invalid_install_config", error);
+  }
+}
+
+async function snapshotBusinessConfig(paths, existed) {
+  await rm(paths.configBackupPath, { force: true });
+  if (!existed) return;
+  await mkdir(paths.stateRoot, { recursive: true, mode: 0o700 });
+  await writeFile(paths.configBackupPath, await readFile(paths.configPath), { mode: 0o600 });
+  await chmod(paths.configBackupPath, 0o600);
+}
+
+async function restoreBusinessConfig(paths, transaction) {
+  if (!transaction?.configManaged) return;
+  if (transaction.configExisted) {
+    if (!await pathExists(paths.configBackupPath)) {
+      fail("业务配置快照缺失", EXIT_CODES.ROLLBACK_FAILED, "config_backup_missing");
+    }
+    await mkdir(path.dirname(paths.configPath), { recursive: true, mode: 0o700 });
+    const temporaryPath = `${paths.configPath}.${process.pid}.${randomUUID()}.restore`;
+    try {
+      await writeFile(temporaryPath, await readFile(paths.configBackupPath), { mode: 0o600 });
+      await chmod(temporaryPath, 0o600);
+      await rename(temporaryPath, paths.configPath);
+    } finally {
+      await rm(temporaryPath, { force: true });
+    }
+  } else {
+    await rm(paths.configPath, { force: true });
+  }
+  await rm(paths.configBackupPath, { force: true });
+}
+
+async function cleanupBusinessConfigSnapshot(paths) {
+  await rm(paths.configBackupPath, { force: true });
 }
 
 export async function readInstallState(paths = lifecyclePaths()) {
@@ -361,6 +436,33 @@ function checkPlatformAndTools(manifest, commandRunner, platform = process.platf
     fail(`Qoder CLI 版本不足，需要 ${manifest.minQodercliVersion} 或更高版本`, EXIT_CODES.PREREQUISITE, "qodercli_version_too_old");
   }
   return { nodeVersion, qoderVersion };
+}
+
+function defaultCommandExists(name, env = process.env) {
+  for (const directory of String(env.PATH ?? "").split(path.delimiter)) {
+    if (!directory) continue;
+    try {
+      accessSync(path.join(directory, name), fsConstants.X_OK);
+      return true;
+    } catch {
+      // Keep searching PATH.
+    }
+  }
+  return false;
+}
+
+function checkDryRunPlatformAndTools(manifest, dependencies) {
+  if (!["darwin", "linux"].includes(dependencies.platform)) {
+    fail("首版安装器仅支持 macOS 和 Linux", EXIT_CODES.PREREQUISITE, "unsupported_platform");
+  }
+  const nodeVersion = process.versions.node;
+  if (compareSemver(nodeVersion, manifest.minNodeVersion) < 0) {
+    fail(`Node.js 版本不足，需要 ${manifest.minNodeVersion} 或更高版本`, EXIT_CODES.PREREQUISITE, "node_version_too_old");
+  }
+  if (!dependencies.commandExists("qodercli")) {
+    fail("未找到可执行的 qodercli", EXIT_CODES.PREREQUISITE, "qodercli_missing");
+  }
+  return { nodeVersion, qoderCliFound: true, qoderVersion: null };
 }
 
 async function sha256File(filePath) {
@@ -560,7 +662,7 @@ async function registerMcp(installPath, oldState, commandRunner) {
 
 async function installCommandWrapper(paths) {
   await mkdir(paths.binHome, { recursive: true, mode: 0o700 });
-  const shellPath = path.join(paths.currentPath, "plugin", "bin", "context-service-qoder.mjs")
+  const shellPath = path.join(paths.currentPath, "plugin", "bin", "context-service-cli.mjs")
     .replaceAll("'", "'\"'\"'");
   const wrapper = [
     "#!/bin/sh",
@@ -590,33 +692,48 @@ async function recoverTransaction(paths, commandRunner) {
     ? validateInstallState(transaction.previousState, paths)
     : null;
   const committed = await readInstallState(paths);
-  if (committed?.version === transaction.targetVersion) {
+  if (transaction.phase === "validated" && committed?.version === transaction.targetVersion) {
     const plugin = await getPluginRecord(commandRunner);
     const mcp = await getMcpConfig(commandRunner);
     if (plugin?.id === committed.pluginId && sameMcpConfig(mcp, committed.mcp)) {
+      await cleanupBusinessConfigSnapshot(paths);
       await rm(paths.transactionPath, { force: true });
       return;
     }
   }
+  await restoreBusinessConfig(paths, transaction);
   if (!previous) {
     const plugin = await getPluginRecord(commandRunner);
     const mcp = await getMcpConfig(commandRunner);
     if (mcp) commandRunner("qodercli", ["mcp", "remove", "--scope", "user", MCP_NAME]);
     if (plugin?.id) uninstallQoderPlugin(plugin.id, commandRunner);
     await rm(path.join(paths.versionsRoot, transaction.targetVersion), { recursive: true, force: true });
+    await rm(paths.currentPath, { recursive: true, force: true });
+    await rm(paths.commandPath, { force: true });
+    await rm(paths.statePath, { force: true });
+    await cleanupBusinessConfigSnapshot(paths);
     await rm(paths.transactionPath, { force: true });
     return;
   }
   try {
     const record = await getPluginRecord(commandRunner);
-    if (record?.id && record.id !== previous.pluginId) uninstallQoderPlugin(record.id, commandRunner);
+    const currentMcp = await getMcpConfig(commandRunner);
+    if (record?.id === previous.pluginId && sameMcpConfig(currentMcp, previous.mcp)) {
+      await switchCurrent(paths, previous.versionDirectory);
+      await atomicWriteJson(paths.statePath, previous);
+      await installCommandWrapper(paths);
+      await cleanupBusinessConfigSnapshot(paths);
+      await rm(paths.transactionPath, { force: true });
+      return;
+    }
+    if (currentMcp) commandRunner("qodercli", ["mcp", "remove", "--scope", "user", MCP_NAME]);
+    if (record?.id) uninstallQoderPlugin(record.id, commandRunner);
     const restored = await installQoderPlugin(path.join(previous.versionDirectory, "plugin"), commandRunner);
-    const actual = await getMcpConfig(commandRunner);
-    if (actual) commandRunner("qodercli", ["mcp", "remove", "--scope", "user", MCP_NAME]);
     const mcp = await registerMcp(restored.installPath, null, commandRunner);
     const restoredState = { ...previous, pluginId: restored.pluginId, installPath: restored.installPath, mcp };
     await switchCurrent(paths, previous.versionDirectory);
     await atomicWriteJson(paths.statePath, restoredState);
+    await installCommandWrapper(paths);
     await rm(paths.transactionPath, { force: true });
   } catch (error) {
     fail("上次生命周期操作未完成且自动恢复失败", EXIT_CODES.ROLLBACK_FAILED, "transaction_recovery_failed", error);
@@ -630,6 +747,35 @@ function makeResult(operation, status, details = {}) {
 function sourceManifestFromOptions(options) {
   if (!options.manifest) return null;
   return validateReleaseManifest(options.manifest, options.channel ?? DEFAULT_CHANNEL);
+}
+
+async function prepareDryRun(options, dependencies) {
+  const channel = options.channel ?? DEFAULT_CHANNEL;
+  if (options.targetVersion && !parseSemver(options.targetVersion)) {
+    fail("--version 必须是严格 SemVer", EXIT_CODES.INVALID_INPUT, "invalid_semver");
+  }
+  let manifest = sourceManifestFromOptions(options);
+  if (!manifest && options.manifestFile) {
+    const rawManifest = await readJsonFile(path.resolve(options.manifestFile), {
+      exitCode: EXIT_CODES.INVALID_INPUT,
+    });
+    manifest = validateReleaseManifest(rawManifest, channel);
+  }
+  if (manifest && options.targetVersion && manifest.version !== options.targetVersion) {
+    fail("指定版本与发布清单版本不一致", EXIT_CODES.INVALID_INPUT, "target_version_mismatch");
+  }
+  if (options.sourceDir) {
+    if (!manifest) fail("--source-dir 必须同时提供发布清单", EXIT_CODES.INVALID_INPUT, "manifest_required");
+    await validatePackageVersions(path.resolve(options.sourceDir), manifest.version);
+  }
+  const prerequisites = checkDryRunPlatformAndTools({
+    minNodeVersion: manifest?.minNodeVersion ?? DEFAULT_MIN_NODE_VERSION,
+    minQodercliVersion: manifest?.minQodercliVersion ?? DEFAULT_MIN_QODERCLI_VERSION,
+  }, dependencies);
+  return {
+    targetVersion: manifest?.version ?? options.targetVersion ?? `${channel}/latest`,
+    prerequisites,
+  };
 }
 
 async function prepareSource(options, dependencies, paths) {
@@ -668,8 +814,7 @@ async function prepareSource(options, dependencies, paths) {
     fail("指定版本与发布清单版本不一致", EXIT_CODES.INVALID_INPUT, "target_version_mismatch");
   }
   checkPlatformAndTools(manifest, dependencies.commandRunner, dependencies.platform);
-  if (options.dryRun) return { manifest, pluginDir: null, temporaryRoot: null };
-  const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "context-service-qoder-"));
+  const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "context-service-cli-"));
   const artifactPath = path.join(temporaryRoot, "artifact.zip");
   await downloadToFile(manifest.artifactUrl, artifactPath, manifest.artifactSize, dependencies.fetch);
   const digest = await sha256File(artifactPath);
@@ -686,28 +831,38 @@ async function prepareSource(options, dependencies, paths) {
 async function stageVersion(pluginDir, manifest, paths) {
   const versionDirectory = path.join(paths.versionsRoot, manifest.version);
   const stagedDirectory = `${versionDirectory}.${process.pid}.${randomUUID()}.tmp`;
-  await mkdir(stagedDirectory, { recursive: true, mode: 0o700 });
-  await cp(pluginDir, path.join(stagedDirectory, "plugin"), {
-    recursive: true,
-    dereference: false,
-    errorOnExist: true,
-  });
-  await mkdir(paths.versionsRoot, { recursive: true, mode: 0o700 });
-  await rm(versionDirectory, { recursive: true, force: true });
-  await rename(stagedDirectory, versionDirectory);
-  return versionDirectory;
+  try {
+    await mkdir(stagedDirectory, { recursive: true, mode: 0o700 });
+    await cp(pluginDir, path.join(stagedDirectory, "plugin"), {
+      recursive: true,
+      dereference: false,
+      errorOnExist: true,
+    });
+    await mkdir(paths.versionsRoot, { recursive: true, mode: 0o700 });
+    await rm(versionDirectory, { recursive: true, force: true });
+    await rename(stagedDirectory, versionDirectory);
+    return versionDirectory;
+  } catch (error) {
+    await rm(stagedDirectory, { recursive: true, force: true });
+    throw error;
+  }
 }
 
 async function rollback(previousState, newPluginId, paths, commandRunner) {
   try {
+    const transaction = await readJsonFile(paths.transactionPath, { allowMissing: true });
+    await restoreBusinessConfig(paths, transaction);
     const actualMcp = await getMcpConfig(commandRunner);
     if (actualMcp) commandRunner("qodercli", ["mcp", "remove", "--scope", "user", MCP_NAME]);
     if (newPluginId) uninstallQoderPlugin(newPluginId, commandRunner);
     if (!previousState) {
-      const transaction = await readJsonFile(paths.transactionPath, { allowMissing: true });
       if (transaction?.targetVersion) {
         await rm(path.join(paths.versionsRoot, transaction.targetVersion), { recursive: true, force: true });
       }
+      await rm(paths.currentPath, { recursive: true, force: true });
+      await rm(paths.commandPath, { force: true });
+      await rm(paths.statePath, { force: true });
+      await cleanupBusinessConfigSnapshot(paths);
       await rm(paths.transactionPath, { force: true });
       return;
     }
@@ -717,6 +872,7 @@ async function rollback(previousState, newPluginId, paths, commandRunner) {
     await switchCurrent(paths, previousState.versionDirectory);
     await atomicWriteJson(paths.statePath, state);
     await installCommandWrapper(paths);
+    await cleanupBusinessConfigSnapshot(paths);
     await rm(paths.transactionPath, { force: true });
   } catch (error) {
     fail("升级失败且自动回滚失败", EXIT_CODES.ROLLBACK_FAILED, "rollback_failed", error);
@@ -739,20 +895,25 @@ async function cleanupOldVersions(paths, keepVersions) {
 }
 
 async function installOrUpgrade(operation, options, dependencies, paths) {
+  let installConfig = operation === "install"
+    ? await prepareInstallConfig(options, paths)
+    : null;
   if (options.dryRun) {
     const previousState = await readInstallState(paths);
-    const prepared = await prepareSource(options, dependencies, paths);
-    const prerequisites = checkPlatformAndTools(prepared.manifest, dependencies.commandRunner, dependencies.platform);
+    const prepared = await prepareDryRun(options, dependencies);
     if (operation === "upgrade" && !previousState) {
       fail("尚未通过正式安装器安装，请先执行 install", EXIT_CODES.LOCAL_STATE, "not_installed");
     }
-    if (previousState && compareSemver(prepared.manifest.version, previousState.version) < 0 && !options.allowDowngrade) {
+    if (previousState && parseSemver(prepared.targetVersion)
+        && compareSemver(prepared.targetVersion, previousState.version) < 0 && !options.allowDowngrade) {
       fail("目标版本低于当前版本；降级必须指定 --allow-downgrade", EXIT_CODES.INVALID_INPUT, "downgrade_not_allowed");
     }
     return makeResult(operation, "dry_run", {
-      targetVersion: prepared.manifest.version,
+      targetVersion: prepared.targetVersion,
       currentVersion: previousState?.version ?? null,
-      prerequisites,
+      prerequisites: prepared.prerequisites,
+      configPath: operation === "install" ? paths.configPath : undefined,
+      configurationWillBeUpdated: operation === "install",
     });
   }
   const releaseLock = await acquireLock(paths);
@@ -762,6 +923,7 @@ async function installOrUpgrade(operation, options, dependencies, paths) {
   try {
     await recoverTransaction(paths, dependencies.commandRunner);
     previousState = await readInstallState(paths);
+    if (operation === "install") installConfig = await prepareInstallConfig(options, paths);
     prepared = await prepareSource(options, dependencies, paths);
     const { manifest } = prepared;
     checkPlatformAndTools(manifest, dependencies.commandRunner, dependencies.platform);
@@ -771,10 +933,37 @@ async function installOrUpgrade(operation, options, dependencies, paths) {
         const plugin = await getPluginRecord(dependencies.commandRunner);
         const mcp = await getMcpConfig(dependencies.commandRunner);
         if (plugin?.id === previousState.pluginId && sameMcpConfig(mcp, previousState.mcp)) {
-          return makeResult(operation, "already_installed", {
-            version: previousState.version,
-            restartRequired: false,
-          });
+          await snapshotBusinessConfig(paths, installConfig.existed);
+          const transaction = {
+            schemaVersion: LIFECYCLE_SCHEMA_VERSION,
+            operation,
+            phase: "prepared",
+            targetVersion: manifest.version,
+            previousState,
+            configManaged: true,
+            configExisted: installConfig.existed,
+            startedAt: new Date().toISOString(),
+          };
+          await atomicWriteJson(paths.transactionPath, transaction);
+          try {
+            await dependencies.writeConfig(installConfig.value, { configPath: paths.configPath });
+            const diagnostics = await dependencies.runDiagnostics({ configPath: paths.configPath, env: {} });
+            if (!diagnostics?.ok) {
+              fail("一键安装只读诊断失败", EXIT_CODES.LOCAL_STATE, "install_diagnostics_failed");
+            }
+            await atomicWriteJson(paths.transactionPath, { ...transaction, phase: "validated" });
+            await cleanupBusinessConfigSnapshot(paths);
+            await rm(paths.transactionPath, { force: true });
+            return makeResult(operation, "already_installed", {
+              version: previousState.version,
+              configurationUpdated: true,
+              restartRequired: false,
+            });
+          } catch (error) {
+            await restoreBusinessConfig(paths, transaction);
+            await rm(paths.transactionPath, { force: true });
+            throw error;
+          }
         }
       }
       if (operation === "upgrade" && comparison === 0) {
@@ -799,13 +988,24 @@ async function installOrUpgrade(operation, options, dependencies, paths) {
     }
 
     const versionDirectory = await stageVersion(prepared.pluginDir, manifest, paths);
-    await atomicWriteJson(paths.transactionPath, {
+    const transaction = {
       schemaVersion: LIFECYCLE_SCHEMA_VERSION,
       operation,
+      phase: "prepared",
       targetVersion: manifest.version,
       previousState,
+      configManaged: operation === "install",
+      configExisted: operation === "install" ? installConfig.existed : undefined,
       startedAt: new Date().toISOString(),
-    });
+    };
+    try {
+      if (operation === "install") await snapshotBusinessConfig(paths, installConfig.existed);
+      await atomicWriteJson(paths.transactionPath, transaction);
+    } catch (error) {
+      await cleanupBusinessConfigSnapshot(paths);
+      await rm(versionDirectory, { recursive: true, force: true });
+      throw error;
+    }
 
     if (existingMcp) dependencies.commandRunner("qodercli", ["mcp", "remove", "--scope", "user", MCP_NAME]);
     if (existingPlugin) uninstallQoderPlugin(existingPlugin.id, dependencies.commandRunner);
@@ -815,6 +1015,13 @@ async function installOrUpgrade(operation, options, dependencies, paths) {
       installed = await installQoderPlugin(path.join(versionDirectory, "plugin"), dependencies.commandRunner);
       newPluginId = installed.pluginId;
       const mcp = await registerMcp(installed.installPath, null, dependencies.commandRunner);
+      if (operation === "install") {
+        await dependencies.writeConfig(installConfig.value, { configPath: paths.configPath });
+        const diagnostics = await dependencies.runDiagnostics({ configPath: paths.configPath, env: {} });
+        if (!diagnostics?.ok) {
+          fail("一键安装只读诊断失败", EXIT_CODES.LOCAL_STATE, "install_diagnostics_failed");
+        }
+      }
       const state = {
         schemaVersion: LIFECYCLE_SCHEMA_VERSION,
         version: manifest.version,
@@ -830,9 +1037,11 @@ async function installOrUpgrade(operation, options, dependencies, paths) {
         installedAt: new Date().toISOString(),
         previousVersion: previousState?.version ?? null,
       };
+      await atomicWriteJson(paths.transactionPath, { ...transaction, phase: "validated" });
       await switchCurrent(paths, versionDirectory);
       await installCommandWrapper(paths);
-      await atomicWriteJson(paths.statePath, state);
+      await dependencies.writeInstallState(paths.statePath, state);
+      await cleanupBusinessConfigSnapshot(paths);
       await rm(paths.transactionPath, { force: true });
       await cleanupOldVersions(paths, new Set([
         manifest.version,
@@ -845,7 +1054,7 @@ async function installOrUpgrade(operation, options, dependencies, paths) {
       });
     } catch (error) {
       await rollback(previousState, newPluginId, paths, dependencies.commandRunner);
-      if (previousState) {
+      if (operation === "upgrade" && previousState) {
         throw new LifecycleError(
           `升级失败，已恢复 ${previousState.version}`,
           EXIT_CODES.ROLLED_BACK,
@@ -857,6 +1066,7 @@ async function installOrUpgrade(operation, options, dependencies, paths) {
     }
   } finally {
     if (prepared?.temporaryRoot) await rm(prepared.temporaryRoot, { recursive: true, force: true });
+    if (!await pathExists(paths.transactionPath)) await cleanupBusinessConfigSnapshot(paths);
     await releaseLock();
   }
 }
@@ -950,6 +1160,11 @@ export function lifecycleDependencies(overrides = {}) {
     env: overrides.env ?? process.env,
     platform: overrides.platform ?? process.platform,
     homeDirectory: overrides.homeDirectory ?? os.homedir(),
+    runDiagnostics: overrides.runDiagnostics ?? runReadOnlyDiagnostics,
+    writeConfig: overrides.writeConfig ?? saveConfig,
+    writeInstallState: overrides.writeInstallState ?? atomicWriteJson,
+    commandExists: overrides.commandExists
+      ?? ((name) => defaultCommandExists(name, overrides.env ?? process.env)),
   };
 }
 
@@ -992,11 +1207,17 @@ export function renderLifecycleResult(result) {
   };
   const lines = [labels[result.status] ?? "操作完成"];
   if (result.version) lines.push(`版本：${result.version}`);
+  if (result.targetVersion) lines.push(`目标版本：${result.targetVersion}`);
+  if (result.currentVersion) lines.push(`当前版本：${result.currentVersion}`);
   if (result.previousVersion) lines.push(`上一版本：${result.previousVersion}`);
   if (result.pluginVersion) lines.push(`插件版本：${result.pluginVersion}`);
   if (result.lifecycleVersion) lines.push(`生命周期工具版本：${result.lifecycleVersion}`);
   if (result.channel) lines.push(`通道：${result.channel}`);
   if (result.qoderVersion) lines.push(`Qoder CLI：${result.qoderVersion}`);
+  if (result.prerequisites?.nodeVersion) lines.push(`Node.js：${result.prerequisites.nodeVersion}`);
+  if (result.prerequisites?.qoderVersion) lines.push(`Qoder CLI：${result.prerequisites.qoderVersion}`);
+  if (result.configPath) lines.push(`配置目标：${result.configPath}`);
+  if (result.configurationWillBeUpdated) lines.push("将写入服务地址和 API Key，并保留已有功能开关。");
   if (result.dataPreserved) lines.push("业务配置和运行数据：已保留");
   if (result.modifiedMcpPreserved) lines.push("提示：MCP 配置已被用户修改，因此未删除");
   if (result.restartRequired) lines.push("请完整重启 Qoder IDE 使变更生效。");

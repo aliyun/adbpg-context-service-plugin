@@ -34,8 +34,31 @@ async function readStdin() {
 }
 
 function argument(name) {
-  const index = process.argv.indexOf(name);
-  return index >= 0 ? process.argv[index + 1] : undefined;
+  const values = [];
+  const args = process.argv.slice(2);
+  for (let index = 0; index < args.length; index += 1) {
+    const value = args[index];
+    if (value === name) {
+      const next = args[index + 1];
+      if (!next || next.startsWith("--")) {
+        const error = new Error(`${name} 缺少参数值`);
+        error.exitCode = EXIT_CODES.INVALID_INPUT;
+        error.errorType = "invalid_argument";
+        throw error;
+      }
+      values.push(next);
+      index += 1;
+    } else if (value.startsWith(`${name}=`)) {
+      values.push(value.slice(name.length + 1));
+    }
+  }
+  if (values.length > 1) {
+    const error = new Error(`${name} 不得重复指定`);
+    error.exitCode = EXIT_CODES.INVALID_INPUT;
+    error.errorType = "duplicate_argument";
+    throw error;
+  }
+  return values[0];
 }
 
 function lifecycleOptions() {
@@ -45,6 +68,8 @@ function lifecycleOptions() {
     manifestFile: argument("--manifest-file"),
     sourceDir: argument("--source-dir"),
     targetVersion: argument("--version"),
+    baseUrl: argument("--base-url"),
+    apiKey: argument("--api-key"),
     allowDowngrade: process.argv.includes("--allow-downgrade"),
     dryRun: process.argv.includes("--dry-run"),
     json: process.argv.includes("--json"),
@@ -85,7 +110,7 @@ async function setup() {
   const baseUrl = argument("--base-url");
   const apiKey = argument("--api-key");
   if (!baseUrl || !apiKey) {
-    throw new Error("用法：context-service-qoder setup --base-url <服务地址> --api-key <API Key>");
+    throw new Error("用法：context-service-cli setup --base-url <服务地址> --api-key <API Key>");
   }
   const configPath = await saveConfig({
     baseUrl,
@@ -128,8 +153,9 @@ async function doctor() {
 }
 
 async function lifecycle(command) {
-  const options = lifecycleOptions();
+  let options = { json: process.argv.includes("--json") };
   try {
+    options = lifecycleOptions();
     if (command === "uninstall" && options.purgeData && !options.yes && !options.dryRun
         && process.stdin.isTTY && process.stdout.isTTY) {
       const readline = createInterface({ input: process.stdin, output: process.stdout });
@@ -174,7 +200,7 @@ async function main() {
     return;
   }
   if (command === "doctor") return doctor();
-  throw new Error("用法：context-service-qoder <install|upgrade|uninstall|version|setup|status|test|help|doctor>");
+  throw new Error("用法：context-service-cli <install|upgrade|uninstall|version|setup|status|test|help|doctor>");
 }
 
 main().catch((error) => {

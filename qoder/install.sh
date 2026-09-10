@@ -3,31 +3,78 @@ set -eu
 
 MANIFEST_URL="${CONTEXT_SERVICE_QODER_RELEASE_MANIFEST_URL:-https://context-database-client.oss-cn-hangzhou.aliyuncs.com/qoder/stable/latest.json}"
 
-expect_version=0
+expect_value=""
 requested_version=""
+base_url=""
+api_key=""
+seen_version=0
+seen_base_url=0
+seen_api_key=0
+dry_run=0
+json_output=0
 for installer_argument in "$@"; do
-  if [ "$expect_version" -eq 1 ]; then
-    requested_version="$installer_argument"
-    expect_version=0
-  elif [ "$installer_argument" = "--version" ]; then
-    expect_version=1
+  if [ -n "$expect_value" ]; then
+    case "$installer_argument" in
+      --*) echo "[context-service] --$expect_value 缺少参数值" >&2; exit 2 ;;
+    esac
+    case "$expect_value" in
+      version) requested_version="$installer_argument" ;;
+      base-url) base_url="$installer_argument" ;;
+      api-key) api_key="$installer_argument" ;;
+    esac
+    expect_value=""
+    continue
   fi
+  case "$installer_argument" in
+    --version)
+      [ "$seen_version" -eq 0 ] || { echo "[context-service] --version 不得重复指定" >&2; exit 2; }
+      seen_version=1
+      expect_value="version"
+      ;;
+    --version=*)
+      [ "$seen_version" -eq 0 ] || { echo "[context-service] --version 不得重复指定" >&2; exit 2; }
+      seen_version=1
+      requested_version=${installer_argument#--version=}
+      ;;
+    --base-url)
+      [ "$seen_base_url" -eq 0 ] || { echo "[context-service] --base-url 不得重复指定" >&2; exit 2; }
+      seen_base_url=1
+      expect_value="base-url"
+      ;;
+    --base-url=*)
+      [ "$seen_base_url" -eq 0 ] || { echo "[context-service] --base-url 不得重复指定" >&2; exit 2; }
+      seen_base_url=1
+      base_url=${installer_argument#--base-url=}
+      ;;
+    --api-key)
+      [ "$seen_api_key" -eq 0 ] || { echo "[context-service] --api-key 不得重复指定" >&2; exit 2; }
+      seen_api_key=1
+      expect_value="api-key"
+      ;;
+    --api-key=*)
+      [ "$seen_api_key" -eq 0 ] || { echo "[context-service] --api-key 不得重复指定" >&2; exit 2; }
+      seen_api_key=1
+      api_key=${installer_argument#--api-key=}
+      ;;
+    --dry-run) dry_run=1 ;;
+    --json) json_output=1 ;;
+  esac
 done
-if [ "$expect_version" -eq 1 ]; then
-  echo "[context-service] --version 缺少版本号" >&2
+if [ -n "$expect_value" ]; then
+  echo "[context-service] --$expect_value 缺少参数值" >&2
   exit 2
 fi
-if [ -n "$requested_version" ]; then
-  MANIFEST_URL="$(node - "$MANIFEST_URL" "$requested_version" <<'NODE'
-const latest = new URL(process.argv[2]);
-const version = process.argv[3];
-if (latest.protocol !== 'https:') throw new Error('发布清单必须使用 HTTPS');
-if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?$/.test(version)) {
-  throw new Error('--version 必须是严格 SemVer');
-}
-process.stdout.write(new URL(`../releases/${version}/manifest.json`, latest).toString());
-NODE
-)"
+if [ -z "$base_url" ] || [ -z "$api_key" ]; then
+  echo "[context-service] install 必须同时提供 --base-url 和 --api-key" >&2
+  exit 2
+fi
+case "$api_key" in
+  *[![:space:]]*) ;;
+  *) echo "[context-service] --api-key 不得为空" >&2; exit 2 ;;
+esac
+if [ "$seen_version" -eq 1 ] && [ -z "$requested_version" ]; then
+  echo "[context-service] --version 缺少版本号" >&2
+  exit 2
 fi
 
 for command_name in node curl unzip qodercli; do
@@ -45,7 +92,67 @@ case "$(uname -s)" in
     ;;
 esac
 
-temporary_root="$(mktemp -d "${TMPDIR:-/tmp}/context-service-qoder.XXXXXX")"
+node - "$base_url" <<'NODE'
+const value = process.argv[2];
+const url = new URL(value);
+if (!['http:', 'https:'].includes(url.protocol)) throw new Error('服务地址必须使用 HTTP 或 HTTPS');
+const loopback = ['localhost', '127.0.0.1', '::1'].includes(url.hostname);
+if (url.protocol !== 'https:' && !loopback) throw new Error('非本机服务地址必须使用 HTTPS');
+NODE
+
+node <<'NODE'
+function semver(value) {
+  const match = String(value).match(/\b(\d+)\.(\d+)\.(\d+)\b/);
+  return match ? match.slice(1).map(Number) : null;
+}
+function lessThan(left, right) {
+  for (let index = 0; index < 3; index += 1) {
+    if (left[index] !== right[index]) return left[index] < right[index];
+  }
+  return false;
+}
+const nodeVersion = semver(process.versions.node);
+if (!nodeVersion || lessThan(nodeVersion, [18, 0, 0])) throw new Error('Node.js 版本不足，需要 18.0.0 或更高版本');
+NODE
+
+if [ "$dry_run" -eq 1 ]; then
+  config_target="${XDG_CONFIG_HOME:-${HOME:?}}/context-service/qoder.json"
+  if [ "$json_output" -eq 1 ]; then
+    node - "$requested_version" "$config_target" <<'NODE'
+const version = process.argv[2] || 'stable/latest';
+const configPath = process.argv[3];
+process.stdout.write(`${JSON.stringify({
+  ok: true,
+  operation: 'install',
+  status: 'dry_run',
+  targetVersion: version,
+  configPath,
+  configurationWillBeUpdated: true,
+})}\n`);
+NODE
+  else
+    echo "Dry-run 检查完成，未下载制品、请求服务或修改本地状态"
+    echo "目标版本：${requested_version:-stable/latest}"
+    echo "配置目标：$config_target"
+    echo "将安装 Qoder 插件、注册 MCP 并写入 Context Service 配置"
+  fi
+  exit 0
+fi
+
+if [ -n "$requested_version" ]; then
+  MANIFEST_URL="$(node - "$MANIFEST_URL" "$requested_version" <<'NODE'
+const latest = new URL(process.argv[2]);
+const version = process.argv[3];
+if (latest.protocol !== 'https:') throw new Error('发布清单必须使用 HTTPS');
+if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?$/.test(version)) {
+  throw new Error('--version 必须是严格 SemVer');
+}
+process.stdout.write(new URL(`../releases/${version}/manifest.json`, latest).toString());
+NODE
+)"
+fi
+
+temporary_root="$(mktemp -d "${TMPDIR:-/tmp}/context-service-cli.XXXXXX")"
 trap 'rm -rf "$temporary_root"' EXIT HUP INT TERM
 manifest_path="$temporary_root/latest.json"
 artifact_path="$temporary_root/artifact.zip"
@@ -114,7 +221,7 @@ NODE
 
 mkdir -m 700 "$extract_path"
 unzip -q "$artifact_path" -d "$extract_path"
-node "$extract_path/plugin/bin/context-service-qoder.mjs" install \
+node "$extract_path/plugin/bin/context-service-cli.mjs" install \
   --source-dir "$extract_path/plugin" \
   --manifest-file "$manifest_path" \
   "$@"

@@ -27,10 +27,14 @@ Context Service 为 Qoder 提供自动上下文、长期记忆、团队知识、
 正式发布后，通过 HTTPS 安装：
 
 ```bash
-curl -fsSL https://<正式发布域名>/qoder/install.sh | sh
+read -s CONTEXT_SERVICE_INSTALL_KEY
+curl -fsSL https://<正式发布域名>/qoder/install.sh | sh -s -- \
+  --base-url https://context-api.example.com \
+  --api-key "$CONTEXT_SERVICE_INSTALL_KEY"
+unset CONTEXT_SERVICE_INSTALL_KEY
 ```
 
-安装过程会校验版本和下载内容，不需要 `sudo`，也不会接收或保存 API Key。安装完成后请完整重启 Qoder IDE。
+安装过程会校验版本和下载内容，不需要 `sudo`，并在安装插件、注册 MCP、写入配置和完成只读诊断后才提交安装状态。安装完成后请完整重启 Qoder IDE。
 
 开发期间可以从已校验的本地目录安装：
 
@@ -47,7 +51,7 @@ qodercli plugins install . --scope user --json
 
 ```bash
 read -s CONTEXT_SERVICE_SETUP_KEY
-context-service-qoder setup \
+context-service-cli setup \
   --base-url https://context-api.example.com \
   --api-key "$CONTEXT_SERVICE_SETUP_KEY"
 unset CONTEXT_SERVICE_SETUP_KEY
@@ -58,7 +62,7 @@ unset CONTEXT_SERVICE_SETUP_KEY
 可按需开启自动能力：
 
 ```bash
-context-service-qoder setup \
+context-service-cli setup \
   --base-url https://context-api.example.com \
   --api-key "$CONTEXT_SERVICE_SETUP_KEY" \
   --enable-prompt-hook \
@@ -126,28 +130,28 @@ context-service-qoder setup \
 ## 状态、升级与卸载
 
 ```bash
-context-service-qoder status
-context-service-qoder test
-context-service-qoder version
-context-service-qoder doctor
+context-service-cli status
+context-service-cli test
+context-service-cli version
+context-service-cli doctor
 ```
 
 升级由用户主动触发，不会在后台静默执行：
 
 ```bash
-context-service-qoder upgrade
+context-service-cli upgrade
 ```
 
 默认卸载保留 API Key 配置和轮次状态：
 
 ```bash
-context-service-qoder uninstall
+context-service-cli uninstall
 ```
 
 彻底删除已知配置和状态需要明确确认：
 
 ```bash
-context-service-qoder uninstall --purge-data --yes
+context-service-cli uninstall --purge-data --yes
 ```
 
 安装、升级和卸载支持 `--dry-run` 与 `--json`。完成后请完整重启 Qoder IDE。
@@ -155,6 +159,7 @@ context-service-qoder uninstall --purge-data --yes
 ## 安全与隐私
 
 - API Key 仅用于访问用户配置的 Context Service，不写入 Qoder 工具配置
+- `--api-key` 在安装进程存活期间可能被同机进程观察；应使用隐藏输入变量并在安装后立即清理变量
 - 非本机服务地址必须使用 HTTPS
 - 自动对话同步和长期记忆保存默认关闭
 - `/context-test` 不执行业务写入

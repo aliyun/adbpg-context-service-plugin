@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${QODER_PLUGIN_ROOT}/bin/context-service-qoder.mjs\" hook SessionStart",
+            "command": "node \"${QODER_PLUGIN_ROOT}/bin/context-service-cli.mjs\" hook SessionStart",
             "timeout": 10
           }
         ]
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${QODER_PLUGIN_ROOT}/bin/context-service-qoder.mjs\" hook UserPromptSubmit",
+            "command": "node \"${QODER_PLUGIN_ROOT}/bin/context-service-cli.mjs\" hook UserPromptSubmit",
             "timeout": 10
           }
         ]
@@ -27,7 +27,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${QODER_PLUGIN_ROOT}/bin/context-service-qoder.mjs\" hook Stop",
+            "command": "node \"${QODER_PLUGIN_ROOT}/bin/context-service-cli.mjs\" hook Stop",
             "timeout": 15
           }
         ]

@@ -184,7 +184,7 @@ export async function runReadOnlyDiagnostics(options = {}) {
       params: {
         protocolVersion: "2025-06-18",
         capabilities: {},
-        clientInfo: { name: "context-service-qoder-diagnostic", version: PLUGIN_VERSION },
+        clientInfo: { name: "context-service-cli-diagnostic", version: PLUGIN_VERSION },
       },
     });
     const initialize = findResponse(initializeMessages, 1);
@@ -239,7 +239,7 @@ export function renderSetupHelp() {
     "安全提醒：不要在 Qoder 聊天或斜杠命令参数中粘贴 API Key。请在本机终端执行：",
     "",
     "read -s CONTEXT_SERVICE_SETUP_KEY",
-    "context-service-qoder setup \\",
+    "context-service-cli setup \\",
     "  --base-url <服务地址> \\",
     "  --api-key \"$CONTEXT_SERVICE_SETUP_KEY\" \\",
     "  [--timeout-ms <毫秒>] \\",
@@ -265,7 +265,7 @@ export function renderHelp() {
     "推荐顺序：/context-setup → /context-status → /context-test",
     "",
     "插件支持自动加载上下文、召回相关内容和处理每轮对话，并提供 12 个按需工具。",
-    "管理命令：context-service-qoder <install|upgrade|uninstall|version|doctor>",
+    "管理命令：context-service-cli <install|upgrade|uninstall|version|doctor>",
     "管理参数：--dry-run、--json；卸载数据使用 --purge-data --yes",
     "安全提醒：不要在聊天消息中粘贴 API Key。",
     "",

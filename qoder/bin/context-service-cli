@@ -2,4 +2,4 @@
 set -eu
 
 command_directory="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
-exec node "$command_directory/context-service-qoder.mjs" "$@"
+exec node "$command_directory/context-service-cli.mjs" "$@"
