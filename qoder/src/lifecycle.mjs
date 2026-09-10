@@ -38,6 +38,7 @@ export const EXIT_CODES = Object.freeze({
 });
 
 const PLUGIN_NAME = "context-service";
+const AGENT_NAME = "qoder";
 const MCP_NAME = "context-service";
 const MCP_BRIDGE_RELATIVE_PATH = path.join("bin", "context-service-mcp-bridge.mjs");
 const STATE_FILE_NAME = "install.json";
@@ -123,6 +124,9 @@ export function validateReleaseManifest(input, expectedChannel = DEFAULT_CHANNEL
   }
   if (input.schema_version !== LIFECYCLE_SCHEMA_VERSION) {
     fail("不支持的发布清单版本", EXIT_CODES.INVALID_INPUT, "unsupported_manifest_schema");
+  }
+  if (input.agent !== AGENT_NAME) {
+    fail("发布清单的 Agent 与 Qoder 不一致", EXIT_CODES.INVALID_INPUT, "agent_mismatch");
   }
   if (input.channel !== expectedChannel) {
     fail("发布通道与请求不一致", EXIT_CODES.INVALID_INPUT, "channel_mismatch");

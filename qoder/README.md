@@ -28,7 +28,8 @@ Context Service 为 Qoder 提供自动上下文、长期记忆、团队知识、
 
 ```bash
 read -s CONTEXT_SERVICE_INSTALL_KEY
-curl -fsSL https://<正式发布域名>/qoder/install.sh | sh -s -- \
+curl -fsSL https://<正式发布域名>/install.sh | sh -s -- \
+  --agent qoder \
   --base-url https://context-api.example.com \
   --api-key "$CONTEXT_SERVICE_INSTALL_KEY"
 unset CONTEXT_SERVICE_INSTALL_KEY

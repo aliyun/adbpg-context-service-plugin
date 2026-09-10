@@ -28,6 +28,7 @@ import {
 } from "../src/lifecycle.mjs";
 
 const pluginRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const pluginsRoot = path.resolve(pluginRoot, "..");
 const INSTALL_CREDENTIALS = Object.freeze({
   baseUrl: "https://context.example.com",
   apiKey: "sk-install-test-secret",
@@ -40,6 +41,7 @@ function installOptions(options) {
 function manifest(version) {
   return {
     schema_version: 1,
+    agent: "qoder",
     channel: "stable",
     version,
     released_at: "2026-08-27T00:00:00Z",
@@ -165,6 +167,15 @@ test("release manifest rejects insecure artifact URLs and malformed hashes", () 
   const badHash = manifest("1.0.0");
   badHash.artifact_sha256 = "abcd";
   assert.throws(() => validateReleaseManifest(badHash), { exitCode: EXIT_CODES.INVALID_INPUT });
+});
+
+test("release manifest rejects an artifact for another agent", () => {
+  const otherAgent = manifest("1.0.0");
+  otherAgent.agent = "codex";
+  assert.throws(() => validateReleaseManifest(otherAgent), {
+    exitCode: EXIT_CODES.INVALID_INPUT,
+    errorType: "agent_mismatch",
+  });
 });
 
 test("ZIP entry validation rejects absolute and traversal paths", () => {
@@ -506,21 +517,24 @@ test("machine-readable errors redact credentials", () => {
 test("release builder produces a manifest whose size and digest match the ZIP", async () => {
   const outputRoot = await mkdtemp(path.join(os.tmpdir(), "context-service-release-test-"));
   const result = spawnSync(process.execPath, [
-    path.join(pluginRoot, "..", "build-release.mjs"),
+    path.join(pluginsRoot, "build-release.mjs"),
+    "--agent", "qoder",
     "--version", "1.2.3",
-    "--base-url", "https://downloads.example.com/qoder",
+    "--base-url", "https://downloads.example.com",
     "--out-dir", outputRoot,
   ], { encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
   const release = JSON.parse(result.stdout);
-  assert.equal(path.basename(release.artifactPath), "context-service-client-1.2.3.zip");
-  assert.match(release.manifest.artifact_url, /\/context-service-client-1\.2\.3\.zip$/);
+  assert.equal(release.agent, "qoder");
+  assert.equal(release.manifest.agent, "qoder");
+  assert.equal(path.basename(release.artifactPath), "context-service-qoder-1.2.3.zip");
+  assert.match(release.manifest.artifact_url, /\/qoder\/releases\/1\.2\.3\/context-service-qoder-1\.2\.3\.zip$/);
   const artifact = await readFile(release.artifactPath);
   assert.equal(artifact.length, release.manifest.artifact_size);
   assert.equal(createHash("sha256").update(artifact).digest("hex"), release.manifest.artifact_sha256);
   assert.equal(release.manifest.version, "1.2.3");
   const immutableManifest = JSON.parse(await readFile(
-    path.join(outputRoot, "releases", "1.2.3", "manifest.json"),
+    path.join(outputRoot, "qoder", "releases", "1.2.3", "manifest.json"),
     "utf8",
   ));
   assert.deepEqual(immutableManifest, release.manifest);
@@ -528,6 +542,7 @@ test("release builder produces a manifest whose size and digest match the ZIP", 
     encoding: "utf8",
   });
   assert.doesNotMatch(archiveEntries, /DEVELOPMENT\.md/);
+  assert.equal(archiveEntries.includes("plugin/install.sh"), false);
   assert.match(archiveEntries, /plugin\/bin\/context-service-cli\.mjs/);
   assert.equal(archiveEntries.includes(`plugin/bin/${["context-service", "qoder"].join("-")}.mjs`), false);
   for (const relativePath of [
@@ -555,9 +570,10 @@ test("release builder produces a manifest whose size and digest match the ZIP", 
 test("a built ZIP passes the real safe extraction path", async () => {
   const outputRoot = await mkdtemp(path.join(os.tmpdir(), "context-service-release-install-test-"));
   const build = spawnSync(process.execPath, [
-    path.join(pluginRoot, "..", "build-release.mjs"),
+    path.join(pluginsRoot, "build-release.mjs"),
+    "--agent", "qoder",
     "--version", "1.3.0",
-    "--base-url", "https://downloads.example.com/qoder",
+    "--base-url", "https://downloads.example.com",
     "--out-dir", outputRoot,
   ], { encoding: "utf8" });
   assert.equal(build.status, 0, build.stderr);
@@ -611,11 +627,12 @@ test("ZIP symbolic links are rejected before extraction", async () => {
   );
 });
 
-test("POSIX installer is syntactically valid and requires one-click credentials", async () => {
-  const installerPath = path.join(pluginRoot, "install.sh");
+test("POSIX installer is syntactically valid and requires agent and one-click credentials", async () => {
+  const installerPath = path.join(pluginsRoot, "install.sh");
   const result = spawnSync("sh", ["-n", installerPath], { encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
   const source = await readFile(installerPath, "utf8");
+  assert.match(source, /--agent/);
   assert.match(source, /--base-url/);
   assert.match(source, /--api-key/);
   assert.doesNotMatch(source, /CONTEXT_SERVICE_API_KEY/);
@@ -625,7 +642,8 @@ test("POSIX installer dry-run performs no download or local write", async () => 
   const home = await mkdtemp(path.join(os.tmpdir(), "context-service-installer-dry-run-"));
   const secret = "installer-dry-run-secret";
   const result = spawnSync("sh", [
-    path.join(pluginRoot, "install.sh"),
+    path.join(pluginsRoot, "install.sh"),
+    "--agent", "qoder",
     "--base-url", "http://127.0.0.1:65535",
     "--api-key", secret,
     "--dry-run",
@@ -636,14 +654,59 @@ test("POSIX installer dry-run performs no download or local write", async () => 
       ...process.env,
       HOME: home,
       XDG_CONFIG_HOME: path.join(home, "config"),
-      CONTEXT_SERVICE_QODER_RELEASE_MANIFEST_URL: "https://127.0.0.1:1/must-not-be-requested.json",
+      CONTEXT_SERVICE_RELEASE_BASE_URL: "https://127.0.0.1:1/must-not-be-requested",
     },
   });
   assert.equal(result.status, 0, result.stderr);
   const output = JSON.parse(result.stdout);
   assert.equal(output.status, "dry_run");
+  assert.equal(output.agent, "qoder");
   assert.equal(output.configurationWillBeUpdated, true);
   assert.doesNotMatch(`${result.stdout}${result.stderr}`, new RegExp(secret));
+  assert.deepEqual(await readdir(home), []);
+});
+
+test("release builder rejects missing, duplicate, and unsupported agents", () => {
+  const builder = path.join(pluginsRoot, "build-release.mjs");
+  const missing = spawnSync(process.execPath, [builder, "--version", "1.2.3"], { encoding: "utf8" });
+  assert.notEqual(missing.status, 0);
+  assert.match(missing.stderr, /必须提供 --agent/);
+  const unsupported = spawnSync(process.execPath, [
+    builder, "--agent", "codex", "--version", "1.2.3",
+  ], { encoding: "utf8" });
+  assert.notEqual(unsupported.status, 0);
+  assert.match(unsupported.stderr, /不支持的 Agent/);
+  const duplicate = spawnSync(process.execPath, [
+    builder, "--agent", "qoder", "--agent", "qoder", "--version", "1.2.3",
+  ], { encoding: "utf8" });
+  assert.notEqual(duplicate.status, 0);
+  assert.match(duplicate.stderr, /--agent 不得重复指定/);
+});
+
+test("POSIX installer rejects missing, duplicate, and unsupported agents before writes", async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "context-service-installer-agent-test-"));
+  const installer = path.join(pluginsRoot, "install.sh");
+  const common = ["--base-url", "http://127.0.0.1:65535", "--api-key", "secret", "--dry-run"];
+  const missing = spawnSync("sh", [installer, ...common], {
+    encoding: "utf8",
+    env: { ...process.env, HOME: home, XDG_CONFIG_HOME: path.join(home, "config") },
+  });
+  assert.equal(missing.status, 2);
+  assert.match(missing.stderr, /必须提供 --agent/);
+  const unsupported = spawnSync("sh", [installer, "--agent", "codex", ...common], {
+    encoding: "utf8",
+    env: { ...process.env, HOME: home, XDG_CONFIG_HOME: path.join(home, "config") },
+  });
+  assert.equal(unsupported.status, 2);
+  assert.match(unsupported.stderr, /不支持的 Agent/);
+  const duplicate = spawnSync("sh", [
+    installer, "--agent", "qoder", "--agent", "qoder", ...common,
+  ], {
+    encoding: "utf8",
+    env: { ...process.env, HOME: home, XDG_CONFIG_HOME: path.join(home, "config") },
+  });
+  assert.equal(duplicate.status, 2);
+  assert.match(duplicate.stderr, /--agent 不得重复指定/);
   assert.deepEqual(await readdir(home), []);
 });
 

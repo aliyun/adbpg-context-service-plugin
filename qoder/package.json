@@ -13,7 +13,6 @@
     "bin/",
     "commands/",
     "hooks/",
-    "install.sh",
     "skills/",
     "src/",
     "README.md",
@@ -21,8 +20,8 @@
     "SECURITY.md"
   ],
   "scripts": {
-    "check": "sh -n bin/context-service-cli && node --check bin/context-service-cli.mjs && node --check bin/context-service-mcp-bridge.mjs && node --check src/config.mjs && node --check src/context-client.mjs && node --check src/diagnostics.mjs && node --check src/hook-handler.mjs && node --check src/lifecycle.mjs && node --check src/mcp-bridge.mjs && node --check src/transcript.mjs && node --check src/turn-id.mjs && node --check src/version.mjs && node --check ../build-release.mjs",
-    "build:release": "node ../build-release.mjs",
+    "check": "sh -n bin/context-service-cli && sh -n ../install.sh && node --check bin/context-service-cli.mjs && node --check bin/context-service-mcp-bridge.mjs && node --check src/config.mjs && node --check src/context-client.mjs && node --check src/diagnostics.mjs && node --check src/hook-handler.mjs && node --check src/lifecycle.mjs && node --check src/mcp-bridge.mjs && node --check src/transcript.mjs && node --check src/turn-id.mjs && node --check src/version.mjs && node --check ../build-release.mjs",
+    "build:release": "node ../build-release.mjs --agent qoder",
     "test": "node --test",
     "verify": "npm run check && npm test"
   }
