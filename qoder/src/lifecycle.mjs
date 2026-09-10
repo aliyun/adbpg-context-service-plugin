@@ -25,7 +25,7 @@ import { PLUGIN_VERSION } from "./version.mjs";
 export const LIFECYCLE_SCHEMA_VERSION = 1;
 export const DEFAULT_CHANNEL = "stable";
 export const DEFAULT_MANIFEST_URL =
-  "https://context-database-client.oss-cn-hangzhou.aliyuncs.com/qoder/stable/latest.json";
+  "https://adbpg-context-service-client.oss-cn-hangzhou.aliyuncs.com/qoder/stable/latest.json";
 export const EXIT_CODES = Object.freeze({
   OK: 0,
   INVALID_INPUT: 2,

@@ -17,6 +17,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   compareSemver,
+  DEFAULT_MANIFEST_URL,
   EXIT_CODES,
   lifecyclePaths,
   parseSemver,
@@ -176,6 +177,13 @@ test("release manifest rejects an artifact for another agent", () => {
     exitCode: EXIT_CODES.INVALID_INPUT,
     errorType: "agent_mismatch",
   });
+});
+
+test("Qoder lifecycle uses the formal OSS stable manifest", () => {
+  assert.equal(
+    DEFAULT_MANIFEST_URL,
+    "https://adbpg-context-service-client.oss-cn-hangzhou.aliyuncs.com/qoder/stable/latest.json",
+  );
 });
 
 test("ZIP entry validation rejects absolute and traversal paths", () => {
@@ -520,7 +528,6 @@ test("release builder produces a manifest whose size and digest match the ZIP", 
     path.join(pluginsRoot, "build-release.mjs"),
     "--agent", "qoder",
     "--version", "1.2.3",
-    "--base-url", "https://downloads.example.com",
     "--out-dir", outputRoot,
   ], { encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
@@ -528,7 +535,10 @@ test("release builder produces a manifest whose size and digest match the ZIP", 
   assert.equal(release.agent, "qoder");
   assert.equal(release.manifest.agent, "qoder");
   assert.equal(path.basename(release.artifactPath), "context-service-qoder-1.2.3.zip");
-  assert.match(release.manifest.artifact_url, /\/qoder\/releases\/1\.2\.3\/context-service-qoder-1\.2\.3\.zip$/);
+  assert.equal(
+    release.manifest.artifact_url,
+    "https://adbpg-context-service-client.oss-cn-hangzhou.aliyuncs.com/qoder/releases/1.2.3/context-service-qoder-1.2.3.zip",
+  );
   const artifact = await readFile(release.artifactPath);
   assert.equal(artifact.length, release.manifest.artifact_size);
   assert.equal(createHash("sha256").update(artifact).digest("hex"), release.manifest.artifact_sha256);
@@ -635,6 +645,7 @@ test("POSIX installer is syntactically valid and requires agent and one-click cr
   assert.match(source, /--agent/);
   assert.match(source, /--base-url/);
   assert.match(source, /--api-key/);
+  assert.match(source, /https:\/\/adbpg-context-service-client\.oss-cn-hangzhou\.aliyuncs\.com/);
   assert.doesNotMatch(source, /CONTEXT_SERVICE_API_KEY/);
 });
 
